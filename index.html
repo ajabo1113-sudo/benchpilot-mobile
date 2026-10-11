@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#173d34">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="BenchPilot">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>BenchPilot</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#dashboard" aria-label="BenchPilot dashboard">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 8.5 16 3l10 5.5v15L16 29 6 23.5z"/><path d="M6 8.5 16 14l10-5.5M16 14v15M11 5.8l10 5.5"/></svg></span>
+        <span><strong>BenchPilot</strong><small>WORKSHOP</small></span>
+      </a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="primary-nav" aria-label="Main navigation">
+        <button class="nav-item active" data-page="dashboard"><span class="nav-icon">⌂</span>Dashboard</button>
+        <button class="nav-item" data-page="projects"><span class="nav-icon">▤</span>Projects<span class="nav-count" id="project-count">0</span></button>
+        <button class="nav-item" data-page="builds"><span class="nav-icon">▧</span>Builds</button>
+        <button class="nav-item" data-page="materials"><span class="nav-icon">▥</span>Materials</button>
+        <button class="nav-item" data-page="calculator"><span class="nav-icon">⌗</span>Cut calculator</button>
+        <button class="nav-item mobile-settings" data-page="settings"><span class="nav-icon">⚙</span>Settings</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="local-status"><span class="status-dot"></span><span><strong>Your workshop</strong><small id="data-save-status">Saved on this device</small></span></div><button class="nav-item settings-link" data-page="settings"><span class="nav-icon">⚙</span>Settings</button></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar"><div class="breadcrumbs"><span>WORKSPACE</span><span class="crumb-divider">/</span><strong id="breadcrumb-current">Dashboard</strong></div><div class="topbar-right"><span class="offline-pill"><span class="status-dot"></span>Offline ready</span><span class="avatar">B</span></div></header>
+      <div id="page-content" class="page-content"></div>
+    </main>
+  </div>
+  <div id="modal-root"></div>
+  <input id="import-file" type="file" accept="application/json,.json" hidden>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(error => console.warn('Offline app setup could not start.', error)));
+    }
+  </script>
+</body>
+</html>
