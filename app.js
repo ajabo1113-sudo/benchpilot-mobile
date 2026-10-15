@@ -2,6 +2,10 @@
   'use strict';
   const BRAND = { name: 'BenchPilot', shortName: 'BenchPilot', tagline: 'Plan it. Build it. Track it.' };
   const STORE_KEY = 'jabo-workshop-data-v1'; // Kept stable so existing workshop data remains available.
+  const USER_STORE_PREFIX = `${STORE_KEY}-user-`;
+  const LEGACY_CLAIM_KEY = `${STORE_KEY}-legacy-claimed-by`;
+  const CLOUD_REVISION_PREFIX = `${STORE_KEY}-cloud-revision-`;
+  const CLOUD_BASE_PREFIX = `${STORE_KEY}-cloud-base-`;
   const STATE_VERSION = 7;
   const DEFAULT_SETTINGS = { units: 'inches', numberFormat: 'fraction', kerf: 0.125 };
   const emptyState = { version: STATE_VERSION, projects: [], materials: [], builds: [], settings: { ...DEFAULT_SETTINGS } };
@@ -9,7 +13,13 @@
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const uid = () => crypto.randomUUID();
+  const supabaseConfig = window.BENCHPILOT_SUPABASE_CONFIG;
+  const supabaseClient = window.supabase?.createClient && supabaseConfig?.url && supabaseConfig?.publishableKey
+    ? window.supabase.createClient(supabaseConfig.url, supabaseConfig.publishableKey, { auth: { autoRefreshToken: true, persistSession: true } })
+    : null;
+  const cloudAvailable = !!supabaseClient && (location.protocol === 'https:' || location.hostname === 'localhost');
   let storageBlocked = false, storageDirty = false, loadProblem = '', storageBlockedReason = '';
+  let authUser = null, authUserId = null, cloudRevision = null, cloudConflict = null, cloudTimer = null, cloudSyncing = false, cloudStatus = cloudAvailable ? 'Offline mode · saved on this device' : 'Open the HTTPS app to sign in and sync';
   let state = loadState(), currentPage = 'dashboard', currentProjectId = null, currentBuildId = null;
   let projectSearch = '', projectStatusFilter = 'all', projectVisibilityFilter = 'active', materialTypeFilter = 'all', materialThicknessFilter = 'all', toastTimer;
 
@@ -21,9 +31,16 @@
   function validBuildParts(parts) { return Array.isArray(parts) && parts.every(part => part && typeof part.id === 'string' && Number.isFinite(Number(part.length)) && Number(part.length) > 0 && Number.isInteger(Number(part.quantity)) && Number(part.quantity) > 0); }
   function validBuilds(value) { return Array.isArray(value) && value.every(b => b && typeof b.id === 'string' && typeof b.name === 'string' && Array.isArray(b.versions) && b.versions.every(v => v && Number.isInteger(Number(v.number)) && Number(v.number) > 0 && validBuildParts(v.parts)) && (b.draft === undefined || b.draft === null || (b.draft && Number.isInteger(Number(b.draft.versionNumber)) && Number(b.draft.versionNumber) > 0 && (b.draft.baseVersionId === null || typeof b.draft.baseVersionId === 'string') && validBuildParts(b.draft.parts) && (b.draft.savedParts === undefined || validBuildParts(b.draft.savedParts)) && typeof b.draft.dirty === 'boolean'))); }
   function validProjectBuilds(projects) { return projects.every(p => p.builds === undefined || (Array.isArray(p.builds) && p.builds.every(ref => ref && typeof ref.id === 'string' && typeof ref.buildId === 'string' && Number.isInteger(Number(ref.quantity)) && Number(ref.quantity) > 0 && Number.isInteger(Number(ref.versionNumber)) && Number(ref.versionNumber) > 0 && validBuildParts(ref.snapshot?.parts)))); }
-  function loadState() {
+  function activeStoreKey() {
+    if (authUserId) return `${USER_STORE_PREFIX}${authUserId}`;
+    try { return localStorage.getItem(LEGACY_CLAIM_KEY) ? `${STORE_KEY}-anonymous` : STORE_KEY; }
+    catch { return STORE_KEY; }
+  }
+  function accountRevisionKey(userId = authUserId) { return `${CLOUD_REVISION_PREFIX}${userId}`; }
+  function accountBaseKey(userId = authUserId) { return `${CLOUD_BASE_PREFIX}${userId}`; }
+  function loadState(key = activeStoreKey()) {
     try {
-      const raw = localStorage.getItem(STORE_KEY);
+      const raw = localStorage.getItem(key);
       if (raw === null) return structuredClone(emptyState);
       const saved = JSON.parse(raw);
       if (!isRecord(saved) || ![1, 2, 3, 4, 5, 6, 7].includes(saved.version) || !validProjects(saved.projects) || !validProjectBuilds(saved.projects) || (saved.materials !== undefined && !validMaterials(saved.materials)) || (saved.builds !== undefined && !validBuilds(saved.builds)) || (saved.settings !== undefined && !isRecord(saved.settings))) throw new Error('The saved workshop data has an unsupported format.');
@@ -37,7 +54,7 @@
       if (!Number.isFinite(Number(result.settings.kerf)) || Number(result.settings.kerf) < 0) result.settings.kerf = DEFAULT_SETTINGS.kerf;
       result.settings.kerf = Number(result.settings.kerf);
       if (saved.version !== STATE_VERSION || !Array.isArray(saved.materials) || !Array.isArray(saved.builds) || !saved.settings || !Number.isFinite(Number(saved.settings.kerf))) {
-        try { localStorage.setItem(STORE_KEY, JSON.stringify(result)); }
+        try { localStorage.setItem(key, JSON.stringify(result)); }
         catch (error) { storageDirty = true; storageBlocked = true; storageBlockedReason = 'migration'; loadProblem = 'Saved workshop data was read, but its upgrade could not be saved. Writing is paused to protect the original copy.'; console.warn('Workshop data loaded but its migration could not be saved; future writes are paused to protect the original copy.', error); }
       }
       return result;
@@ -45,9 +62,189 @@
   }
   function save() {
     if (storageBlocked) { storageDirty = true; toast(storageBlockedReason === 'migration' ? 'Saving is paused because the saved data upgrade could not be completed. Download a recovery copy, then reopen the app or restore a backup.' : 'Saving is paused because the existing saved data could not be read. Restore a backup first; the original copy is preserved.', true); return false; }
-    try { state.version = STATE_VERSION; localStorage.setItem(STORE_KEY, JSON.stringify(state)); storageDirty = false; return true; }
+    try { state.version = STATE_VERSION; localStorage.setItem(activeStoreKey(), JSON.stringify(state)); storageDirty = false; if (authUserId) scheduleCloudSync(); return true; }
     catch (e) { storageDirty = true; toast('Could not save to browser storage. Your latest changes are still open in this window; download a backup before closing.', true); return false; }
   }
+  function setCloudStatus(message) { cloudStatus = message; const target = $('[data-cloud-status]'); if (target) target.textContent = message; }
+  function hasWorkshopRecords(value) {
+    const settings = value?.settings || DEFAULT_SETTINGS;
+    return !!(value?.projects?.length || value?.materials?.length || value?.builds?.length || settings.units !== DEFAULT_SETTINGS.units || settings.numberFormat !== DEFAULT_SETTINGS.numberFormat || Number(settings.kerf) !== DEFAULT_SETTINGS.kerf);
+  }
+  function normalizeCloudData(value) {
+    if (!isRecord(value) || ![1, 2, 3, 4, 5, 6, 7].includes(value.version) || !validProjects(value.projects) || !validProjectBuilds(value.projects) || (value.materials !== undefined && !validMaterials(value.materials)) || (value.builds !== undefined && !validBuilds(value.builds)) || (value.settings !== undefined && !isRecord(value.settings))) throw new Error('The cloud workshop data has an unsupported format. Your local data was left unchanged.');
+    const projects = structuredClone(value.projects), materials = structuredClone(value.materials || []), builds = structuredClone(value.builds || []);
+    if (value.version < 3) for (const p of projects) for (const part of p.parts || []) {
+      if (part.materialId) { delete part.width; delete part.thickness; }
+      else if (part.width !== undefined || part.thickness !== undefined) { part.legacyDimensions = { width: part.width, thickness: part.thickness }; delete part.width; delete part.thickness; }
+    }
+    const settings = { ...DEFAULT_SETTINGS, ...(value.settings || {}) };
+    if (!['inches', 'metric'].includes(settings.units)) settings.units = DEFAULT_SETTINGS.units;
+    if (!['fraction', 'decimal'].includes(settings.numberFormat)) settings.numberFormat = DEFAULT_SETTINGS.numberFormat;
+    if (!Number.isFinite(Number(settings.kerf)) || Number(settings.kerf) < 0) settings.kerf = DEFAULT_SETTINGS.kerf;
+    settings.kerf = Number(settings.kerf);
+    return { version: STATE_VERSION, projects, materials, builds, settings };
+  }
+  function rememberCloudBase(snapshot, revision) {
+    cloudRevision = revision;
+    localStorage.setItem(accountRevisionKey(), String(revision));
+    localStorage.setItem(accountBaseKey(), JSON.stringify(snapshot));
+  }
+  function applyCloudSnapshot(snapshot, announce = true) {
+    if (!authUserId) return;
+    state = normalizeCloudData(snapshot.data);
+    storageBlocked = false; storageDirty = false; storageBlockedReason = ''; loadProblem = '';
+    localStorage.setItem(activeStoreKey(), JSON.stringify(state));
+    localStorage.setItem(LEGACY_CLAIM_KEY, authUserId);
+    rememberCloudBase(state, Number(snapshot.revision));
+    cloudConflict = null;
+    setCloudStatus(`Synced · ${new Date(snapshot.updated_at).toLocaleString()}`);
+    if (announce) { renderApp(); toast('Cloud workshop loaded on this device.'); }
+  }
+  async function readCloudSnapshot() {
+    const { data, error } = await supabaseClient.from('user_workshop').select('data, revision, updated_at').eq('user_id', authUserId).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+  function presentConflict(remote, message = 'This device and the cloud both have changes.') {
+    cloudConflict = remote;
+    setCloudStatus('Sync paused · choose which copy to keep');
+    renderApp();
+    toast(message, true);
+  }
+  async function activateAccount(user) {
+    if (!user) {
+      if (authUserId) { authUserId = null; authUser = null; cloudRevision = null; cloudConflict = null; state = loadState(activeStoreKey()); }
+      setCloudStatus(navigator.onLine ? 'Offline mode · saved on this device' : 'Offline · saved on this device');
+      renderApp();
+      return;
+    }
+    if (authUserId === user.id) { authUser = user; return; }
+    const canUseLegacy = !localStorage.getItem(LEGACY_CLAIM_KEY) && !localStorage.getItem(`${USER_STORE_PREFIX}${user.id}`);
+    const legacy = canUseLegacy ? loadState(STORE_KEY) : structuredClone(emptyState);
+    authUser = user; authUserId = user.id;
+    const localKey = activeStoreKey(), localRaw = localStorage.getItem(localKey);
+    state = localRaw === null ? structuredClone(emptyState) : loadState(localKey);
+    if (localRaw === null && canUseLegacy && hasWorkshopRecords(legacy)) {
+      state = legacy;
+      localStorage.setItem(localKey, JSON.stringify(state));
+      localStorage.setItem(LEGACY_CLAIM_KEY, user.id);
+    }
+    const savedRevision = Number(localStorage.getItem(accountRevisionKey()));
+    cloudRevision = Number.isFinite(savedRevision) && savedRevision > 0 ? savedRevision : null;
+    cloudConflict = null;
+    setCloudStatus('Checking cloud workshop…'); renderApp();
+    try {
+      const remote = await readCloudSnapshot();
+      if (remote) {
+        if (localRaw === null && canUseLegacy && hasWorkshopRecords(legacy)) {
+          state = legacy;
+          localStorage.setItem(localKey, JSON.stringify(state));
+          localStorage.setItem(LEGACY_CLAIM_KEY, user.id);
+          presentConflict(remote, 'Choose whether to upload this device’s workshop or use the existing cloud copy.');
+          return;
+        }
+        if (localRaw === null || !hasWorkshopRecords(state)) { applyCloudSnapshot(remote); return; }
+        const base = localStorage.getItem(accountBaseKey());
+        const localJson = JSON.stringify(state);
+        if (base && localJson === base) { applyCloudSnapshot(remote); return; }
+        if (base && cloudRevision === Number(remote.revision)) {
+          rememberCloudBase(normalizeCloudData(remote.data), Number(remote.revision));
+          cloudConflict = remote;
+          setCloudStatus('Sync paused · choose which copy to keep'); renderApp();
+          return;
+        }
+        presentConflict(remote);
+        return;
+      }
+      if (localRaw === null && canUseLegacy && hasWorkshopRecords(legacy)) state = legacy;
+      localStorage.setItem(localKey, JSON.stringify(state));
+      localStorage.setItem(LEGACY_CLAIM_KEY, user.id);
+      cloudRevision = null;
+      setCloudStatus('Uploading this device’s workshop…');
+      await syncCloudNow();
+      renderApp();
+    } catch (error) {
+      setCloudStatus(navigator.onLine ? `Sync unavailable · ${error.message || 'check connection'}` : 'Offline · changes saved on this device');
+      renderApp();
+    }
+  }
+  function scheduleCloudSync() {
+    if (!authUserId || !supabaseClient || cloudConflict) return;
+    clearTimeout(cloudTimer);
+    setCloudStatus(navigator.onLine ? 'Saved here · waiting to sync…' : 'Offline · changes saved on this device');
+    cloudTimer = setTimeout(() => syncCloudNow(), 900);
+  }
+  async function syncCloudNow() {
+    if (!authUserId || !supabaseClient || cloudConflict) return;
+    if (!navigator.onLine) { setCloudStatus('Offline · changes saved on this device'); return; }
+    if (cloudSyncing) { scheduleCloudSync(); return; }
+    cloudSyncing = true;
+    const syncingUserId = authUserId, snapshot = structuredClone(state), expectedRevision = cloudRevision;
+    setCloudStatus('Syncing…');
+    try {
+      let result;
+      if (expectedRevision === null) {
+        result = await supabaseClient.from('user_workshop').insert({ user_id: syncingUserId, data: snapshot, revision: 1 }).select('revision, updated_at').maybeSingle();
+      } else {
+        result = await supabaseClient.from('user_workshop').update({ data: snapshot, revision: expectedRevision + 1, updated_at: new Date().toISOString() }).eq('user_id', syncingUserId).eq('revision', expectedRevision).select('revision, updated_at').maybeSingle();
+      }
+      if (result.error) {
+        const remote = await readCloudSnapshot();
+        if (remote) { presentConflict(remote, 'The cloud copy changed before this save could sync.'); return; }
+        throw result.error;
+      }
+      if (!result.data) {
+        const remote = await readCloudSnapshot();
+        if (remote) { presentConflict(remote, 'The cloud copy changed before this save could sync.'); return; }
+        throw new Error('Cloud save was not accepted.');
+      }
+      if (authUserId !== syncingUserId) return;
+      rememberCloudBase(snapshot, Number(result.data.revision));
+      localStorage.setItem(LEGACY_CLAIM_KEY, syncingUserId);
+      setCloudStatus(`Synced · ${new Date(result.data.updated_at).toLocaleString()}`);
+      if (JSON.stringify(state) !== JSON.stringify(snapshot)) scheduleCloudSync();
+    } catch (error) {
+      setCloudStatus(navigator.onLine ? `Sync paused · ${error.message || 'try again'}` : 'Offline · changes saved on this device');
+    } finally { cloudSyncing = false; }
+  }
+  function chooseCloudCopy() {
+    if (!cloudConflict) return;
+    if (hasWorkshopRecords(state) && !confirm('Replace this device’s workshop with the cloud copy? A backup of this device’s current data will be downloaded first.')) return;
+    if (hasWorkshopRecords(state)) exportData();
+    applyCloudSnapshot(cloudConflict);
+  }
+  async function chooseDeviceCopy() {
+    if (!cloudConflict) return;
+    if (!confirm('Replace the cloud workshop with this device’s current data? This affects only your signed-in account.')) return;
+    const remote = cloudConflict;
+    cloudRevision = remote ? Number(remote.revision) : null;
+    cloudConflict = null;
+    await syncCloudNow();
+    renderApp();
+  }
+  async function submitCloudAuth(event) {
+    event.preventDefault();
+    if (!cloudAvailable) { toast('Cloud sign-in requires the HTTPS hosted app. This local file launcher remains offline-only.', true); return; }
+    const form = new FormData(event.currentTarget), email = String(form.get('email') || '').trim(), password = String(form.get('password') || '');
+    const mode = event.submitter?.dataset.authMode || 'signin';
+    if (!email || !password) { toast('Enter your email and password.', true); return; }
+    setCloudStatus(mode === 'signup' ? 'Creating account…' : 'Signing in…');
+    try {
+      const response = mode === 'signup'
+        ? await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: `${location.origin}${location.pathname}` } })
+        : await supabaseClient.auth.signInWithPassword({ email, password });
+      if (response.error) { setCloudStatus('Not signed in'); toast(response.error.message, true); return; }
+      if (!response.data.session) { setCloudStatus('Check your email to confirm your account, then sign in.'); toast('Account created. Confirm the email if prompted, then sign in.'); renderApp(); return; }
+      await activateAccount(response.data.user);
+    } catch (error) { setCloudStatus('Sign-in unavailable'); toast(error.message || 'Could not connect to Supabase.', true); }
+  }
+  if (cloudAvailable) {
+    supabaseClient.auth.onAuthStateChange((_event, session) => { Promise.resolve().then(() => activateAccount(session?.user || null)); });
+    supabaseClient.auth.getSession().then(({ data, error }) => { if (error) setCloudStatus(`Sign-in status unavailable · ${error.message}`); else activateAccount(data.session?.user || null); });
+  }
+  window.addEventListener('online', () => { if (cloudConflict) return; setCloudStatus('Connection restored · syncing…'); syncCloudNow(); });
+  window.addEventListener('offline', () => { if (authUserId) setCloudStatus('Offline · changes saved on this device'); });
+  window.addEventListener('focus', () => { if (authUserId && !cloudConflict) syncCloudNow(); });
   function toast(message, error = false) { $('.toast')?.remove(); const n = document.createElement('div'); n.className = `toast${error ? ' error' : ''}`; n.textContent = message; document.body.append(n); clearTimeout(toastTimer); toastTimer = setTimeout(() => n.remove(), 3000); }
   function touch(p) { p.updatedAt = new Date().toISOString(); }
   function project(id) { return state.projects.find(p => p.id === id); }
@@ -225,7 +422,7 @@
     return `${heading('WORKSHOP TOOLS', 'Cut calculator', `Add or subtract shop measurements in ${unitName()}.`)}<section class="calculator-panel"><div class="calc-content"><div><div class="field"><label class="field-label" for="calc-first">First measurement (${unitName()})</label><input class="field-input" id="calc-first" placeholder="${state.settings.units === 'metric' ? '285.75' : frac ? '11 1/4″' : '11.25'}"></div><div class="field"><label class="field-label" for="calc-operation">Operation</label><select id="calc-operation" class="field-select"><option value="add">Add (+)</option><option value="subtract">Subtract (−)</option></select></div><div class="field"><label class="field-label" for="calc-second">Second measurement (${unitName()})</label><input class="field-input" id="calc-second" placeholder="${state.settings.units === 'metric' ? '19.05' : frac ? '3/4″' : '0.75'}"></div><button class="button button-primary" data-action="calculate">Calculate</button></div><div class="calc-output"><p class="eyebrow">RESULT</p><div id="calc-result" class="calc-result">—</div><div id="calc-decimal" class="subtle">Enter two measurements to start</div><div class="cut-list-note">Results display in ${unitName()}.</div></div></div></section>`;
   }
   function renderSettings() {
-    return `${heading('YOUR WORKSPACE', 'Settings', 'Your workshop information stays on this device.')}<section class="settings-panel settings-stack"><div class="setting-row"><div><strong>Measurement units</strong><p>Choose the units for dimensions across the workshop.</p></div><select class="filter-select" data-setting="units"><option value="inches" ${state.settings.units === 'inches' ? 'selected' : ''}>Inches</option><option value="metric" ${state.settings.units === 'metric' ? 'selected' : ''}>Metric (mm)</option></select></div><div class="setting-row"><div><strong>Measurement display</strong><p>${state.settings.units === 'metric' ? 'Metric dimensions display as decimals.' : 'Choose fractions or decimal inches.'}</p></div><select class="filter-select" data-setting="numberFormat" ${state.settings.units === 'metric' ? 'disabled' : ''}><option value="fraction" ${state.settings.numberFormat === 'fraction' ? 'selected' : ''}>Fractions</option><option value="decimal" ${state.settings.numberFormat === 'decimal' ? 'selected' : ''}>Decimals</option></select></div><div class="setting-row"><div><strong>Back up your workshop</strong><p>Save projects, materials, builds, version history, parts, and notes to a JSON file.</p></div><button class="button button-secondary" data-action="export">Download backup</button></div><div class="setting-row"><div><strong>Restore from a backup</strong><p>Load a BenchPilot or Jabo Workshop JSON backup from this device.</p></div><button class="button button-secondary" data-action="import">Choose file</button></div><div class="setting-row"><div><strong>Stored on this device</strong><p>${state.projects.length} projects · ${state.materials.length} stock items · ${state.builds.length} builds</p></div><span class="offline-pill"><span class="status-dot"></span>Local</span></div></section>`;
+    return `${heading('YOUR WORKSPACE', 'Settings', 'Workshop data stays available offline and syncs to your private account when connected.')}<section class="settings-panel cloud-panel"><div class="cloud-panel-heading"><div><strong>Cloud sync</strong><p>Each account has its own private workshop. Device changes save locally first.</p></div><span class="offline-pill"><span class="status-dot"></span><span data-cloud-status>${esc(cloudStatus)}</span></span></div>${!cloudAvailable ? '<p class="panel-subtitle">The Windows file launcher is offline-only. Open BenchPilot from its HTTPS Pages address to sign in and sync.</p>' : authUser ? `<div class="cloud-account-row"><div><strong>${esc(authUser.email || 'Signed-in account')}</strong><p>Signed in. This device saves to your account’s private workshop.</p></div><div class="detail-actions"><button class="button button-secondary button-small" data-action="sync-now">Sync now</button><button class="button button-secondary button-small" data-action="cloud-sign-out">Sign out</button></div></div>` : `<form class="cloud-auth-form" data-cloud-auth><label>Email<input class="field-input" type="email" name="email" autocomplete="username" required></label><label>Password<input class="field-input" type="password" name="password" autocomplete="current-password" minlength="6" required></label><div class="detail-actions"><button class="button button-primary" type="submit" data-auth-mode="signin">Sign in</button><button class="button button-secondary" type="submit" data-auth-mode="signup">Create account</button></div></form>`}${cloudConflict ? `<div class="cloud-conflict" role="alert"><strong>Choose which workshop copy to keep</strong><p>This device and the cloud have different changes. Choosing one replaces the other copy; a local backup is downloaded before using the cloud copy.</p><div class="detail-actions"><button class="button button-secondary" data-action="use-cloud-copy">Use cloud copy</button><button class="button button-primary" data-action="keep-device-copy">Keep this device’s copy</button></div></div>` : ''}</section><section class="settings-panel settings-stack"><div class="setting-row"><div><strong>Measurement units</strong><p>Choose the units for dimensions across the workshop.</p></div><select class="filter-select" data-setting="units"><option value="inches" ${state.settings.units === 'inches' ? 'selected' : ''}>Inches</option><option value="metric" ${state.settings.units === 'metric' ? 'selected' : ''}>Metric (mm)</option></select></div><div class="setting-row"><div><strong>Measurement display</strong><p>${state.settings.units === 'metric' ? 'Metric dimensions display as decimals.' : 'Choose fractions or decimal inches.'}</p></div><select class="filter-select" data-setting="numberFormat" ${state.settings.units === 'metric' ? 'disabled' : ''}><option value="fraction" ${state.settings.numberFormat === 'fraction' ? 'selected' : ''}>Fractions</option><option value="decimal" ${state.settings.numberFormat === 'decimal' ? 'selected' : ''}>Decimals</option></select></div><div class="setting-row"><div><strong>Back up your workshop</strong><p>Save projects, materials, builds, version history, parts, and notes to a JSON file.</p></div><button class="button button-secondary" data-action="export">Download backup</button></div><div class="setting-row"><div><strong>Restore from a backup</strong><p>Load a BenchPilot or Jabo Workshop JSON backup from this device.</p></div><button class="button button-secondary" data-action="import">Choose file</button></div><div class="setting-row"><div><strong>Stored on this device</strong><p>${state.projects.length} projects · ${state.materials.length} stock items · ${state.builds.length} builds</p></div><span class="offline-pill"><span class="status-dot"></span>Local</span></div></section>`;
   }
   function renderProjectDetail(p) {
     const parts = allProjectParts(p), tolerance = Number(p.cutTolerance) || 0, kerf = Number(p.cutKerf ?? state.settings.kerf) || 0;
@@ -299,7 +496,7 @@
   }
   function downloadText(contents, filename, type = 'application/json') { const url = URL.createObjectURL(new Blob([contents], { type })), a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
   function exportData() { downloadText(JSON.stringify({ ...state, app: BRAND.name, exportedAt: new Date().toISOString() }, null, 2), `benchpilot-backup-${new Date().toISOString().slice(0, 10)}.json`); toast('Backup downloaded.'); }
-  function exportRecoveryData() { try { const raw = localStorage.getItem(STORE_KEY); if (raw === null) throw new Error('No saved copy was found in this browser profile.'); downloadText(raw, `benchpilot-recovery-${new Date().toISOString().slice(0, 10)}.json`); toast('Recovery copy downloaded. Keep it before restoring a backup.'); } catch (error) { toast(error.message || 'Could not read a recovery copy.', true); } }
+  function exportRecoveryData() { try { const raw = localStorage.getItem(activeStoreKey()); if (raw === null) throw new Error('No saved copy was found in this browser profile.'); downloadText(raw, `benchpilot-recovery-${new Date().toISOString().slice(0, 10)}.json`); toast('Recovery copy downloaded. Keep it before restoring a backup.'); } catch (error) { toast(error.message || 'Could not read a recovery copy.', true); } }
   function renderApp() {
     document.title = BRAND.name;
     const brand = $('.brand');
@@ -320,13 +517,18 @@
     $('#page-content').innerHTML = `${saveWarning}${content}`;
   }
   const root = $('#page-content');
+  root.addEventListener('submit', e => { if (e.target.matches('[data-cloud-auth]')) submitCloudAuth(e); });
   root.addEventListener('click', e => {
     const pageBtn = e.target.closest('[data-page]'); if (pageBtn) { const page = pageBtn.dataset.page; requestBuildExit(() => { currentProjectId = null; currentBuildId = null; currentPage = page; renderApp(); }); return; }
     const openBuild = e.target.closest('[data-open-build]'); if (openBuild) { const id = openBuild.dataset.openBuild; requestBuildExit(() => { currentBuildId = id; currentProjectId = null; currentPage = 'builds'; renderApp(); }); return; }
     const open = e.target.closest('[data-open-project]'); if (open) { const id = open.dataset.openProject; requestBuildExit(() => { currentProjectId = id; currentBuildId = null; currentPage = 'projects'; renderApp(); }); return; }
     const b = e.target.closest('[data-action]'); if (!b) return;
     const action = b.dataset.action, id = b.dataset.id, p = ['new-part', 'edit-part', 'delete-part'].includes(action) ? project(currentProjectId) : project(id || currentProjectId);
-    if (action === 'new-project') projectModal();
+    if (action === 'cloud-sign-out') { (async () => { await syncCloudNow(); const { error } = await supabaseClient.auth.signOut(); if (error) toast(error.message, true); })(); }
+    else if (action === 'sync-now') syncCloudNow();
+    else if (action === 'use-cloud-copy') chooseCloudCopy();
+    else if (action === 'keep-device-copy') chooseDeviceCopy();
+    else if (action === 'new-project') projectModal();
     else if (action === 'new-build') buildModal();
     else if (action === 'edit-build' && build(id)) buildModal(build(id));
     else if (action === 'duplicate-build' && build(id)) requestBuildExit(() => {
@@ -409,7 +611,7 @@
     } catch (err) { toast(err.message || 'Could not read that backup.', true); }
   });
   window.addEventListener('beforeunload', e => { if (storageDirty || build(currentBuildId)?.draft?.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  window.addEventListener('storage', e => { if (e.key === STORE_KEY) { state = loadState(); renderApp(); } });
+  window.addEventListener('storage', e => { if (e.key === activeStoreKey()) { state = loadState(activeStoreKey()); renderApp(); if (authUserId) scheduleCloudSync(); } });
   function calculate() { const a = parseInput($('#calc-first').value), b = parseInput($('#calc-second').value); if (a === null || b === null) { toast(`Enter two valid measurements in ${unitName()}.`, true); return; } const n = Math.round((a + ($('#calc-operation').value === 'add' ? b : -b)) * 10000) / 10000; $('#calc-result').textContent = displayMeasure(n); $('#calc-decimal').textContent = `${roundText(state.settings.units === 'metric' ? n * 25.4 : n)} ${unitName()}`; }
   renderApp();
   if (loadProblem) toast(`${loadProblem} The original saved copy was left untouched.`, true);

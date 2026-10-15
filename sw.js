@@ -1,9 +1,11 @@
-const CACHE_NAME = 'benchpilot-shell-v1';
+const CACHE_NAME = 'benchpilot-shell-v2';
 const APP_SHELL = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './supabase-config.js',
+  './vendor/supabase.min.js',
   './manifest.webmanifest',
   './icon.svg',
   './icon-192.png',
