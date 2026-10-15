@@ -225,7 +225,7 @@
   async function submitCloudAuth(event) {
     event.preventDefault();
     if (!cloudAvailable) { toast('Cloud sign-in requires the HTTPS hosted app. This local file launcher remains offline-only.', true); return; }
-    const form = new FormData(event.currentTarget), email = String(form.get('email') || '').trim(), password = String(form.get('password') || '');
+    const form = new FormData(event.target), email = String(form.get('email') || '').trim(), password = String(form.get('password') || '');
     const mode = event.submitter?.dataset.authMode || 'signin';
     if (!email || !password) { toast('Enter your email and password.', true); return; }
     setCloudStatus(mode === 'signup' ? 'Creating account…' : 'Signing in…');
