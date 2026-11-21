@@ -6,9 +6,16 @@
   const LEGACY_CLAIM_KEY = `${STORE_KEY}-legacy-claimed-by`;
   const CLOUD_REVISION_PREFIX = `${STORE_KEY}-cloud-revision-`;
   const CLOUD_BASE_PREFIX = `${STORE_KEY}-cloud-base-`;
-  const STATE_VERSION = 8;
-  const DEFAULT_SETTINGS = { units: 'inches', numberFormat: 'fraction', kerf: 0.125 };
-  const emptyState = { version: STATE_VERSION, projects: [], materials: [], builds: [], settings: { ...DEFAULT_SETTINGS } };
+  const STATE_VERSION = 9;
+  const DEFAULT_BRANDING = { shopName: '', personalName: '', logoDataUrl: '', primaryColor: '#174b3d', secondaryColor: '#22634e', backgroundColor: '#f7f7f3', surfaceColor: '#ffffff', textColor: '#202722' };
+  const DEFAULT_SETTINGS = { units: 'inches', numberFormat: 'fraction', kerf: 0.125, branding: DEFAULT_BRANDING };
+  const COLOR_SCHEMES = {
+    forest: { primaryColor: '#174b3d', secondaryColor: '#22634e', backgroundColor: '#f7f7f3', surfaceColor: '#ffffff', textColor: '#202722' },
+    ocean: { primaryColor: '#22546b', secondaryColor: '#34768a', backgroundColor: '#f1f6f8', surfaceColor: '#ffffff', textColor: '#202a30' },
+    clay: { primaryColor: '#874b39', secondaryColor: '#b36549', backgroundColor: '#faf4ef', surfaceColor: '#fffdfb', textColor: '#332923' },
+    slate: { primaryColor: '#414d63', secondaryColor: '#5a6e87', backgroundColor: '#f2f4f7', surfaceColor: '#ffffff', textColor: '#202631' }
+  };
+  const emptyState = { version: STATE_VERSION, projects: [], materials: [], builds: [], settings: structuredClone(DEFAULT_SETTINGS) };
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -24,6 +31,18 @@
   let projectSearch = '', projectStatusFilter = 'all', projectVisibilityFilter = 'active', materialTypeFilter = 'all', materialThicknessFilter = 'all', toastTimer;
 
   function isRecord(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+  function normalizedBranding(value) {
+    const source = isRecord(value) ? value : {}, result = { ...DEFAULT_BRANDING };
+    for (const key of ['shopName', 'personalName']) if (typeof source[key] === 'string') result[key] = source[key].trim().slice(0, 80);
+    if (typeof source.logoDataUrl === 'string' && /^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(source.logoDataUrl) && source.logoDataUrl.length <= 700000) result.logoDataUrl = source.logoDataUrl;
+    for (const key of ['primaryColor', 'secondaryColor', 'backgroundColor', 'surfaceColor', 'textColor']) if (typeof source[key] === 'string' && /^#[0-9a-f]{6}$/i.test(source[key])) result[key] = source[key];
+    return result;
+  }
+  function normalizedSettings(value) {
+    const settings = { ...structuredClone(DEFAULT_SETTINGS), ...(isRecord(value) ? value : {}) };
+    settings.branding = normalizedBranding(value?.branding);
+    return settings;
+  }
   function validOptionalPositiveNumber(record, key) { return record[key] === undefined || record[key] === null || (Number.isFinite(Number(record[key])) && Number(record[key]) > 0); }
   function validPartRecords(parts) { return Array.isArray(parts) && parts.every(part => isRecord(part) && (part.id === undefined || typeof part.id === 'string') && (part.materialId === undefined || part.materialId === null || typeof part.materialId === 'string') && ['length', 'width', 'thickness'].every(key => validOptionalPositiveNumber(part, key)) && (part.quantity === undefined || part.quantity === null || (Number.isInteger(Number(part.quantity)) && Number(part.quantity) > 0))); }
   function validProjects(value) { return Array.isArray(value) && value.every(p => isRecord(p) && typeof p.name === 'string' && validPartRecords(p.parts) && (p.materialAllocations === undefined || (Array.isArray(p.materialAllocations) && p.materialAllocations.every(a => isRecord(a) && typeof a.materialId === 'string' && Number.isInteger(Number(a.quantity)) && Number(a.quantity) >= 0)))); }
@@ -43,17 +62,17 @@
       const raw = localStorage.getItem(key);
       if (raw === null) return structuredClone(emptyState);
       const saved = JSON.parse(raw);
-      if (!isRecord(saved) || ![1, 2, 3, 4, 5, 6, 7, 8].includes(saved.version) || !validProjects(saved.projects) || !validProjectBuilds(saved.projects) || (saved.materials !== undefined && !validMaterials(saved.materials)) || (saved.builds !== undefined && !validBuilds(saved.builds)) || (saved.settings !== undefined && !isRecord(saved.settings))) throw new Error('The saved workshop data has an unsupported format.');
+      if (!isRecord(saved) || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(saved.version) || !validProjects(saved.projects) || !validProjectBuilds(saved.projects) || (saved.materials !== undefined && !validMaterials(saved.materials)) || (saved.builds !== undefined && !validBuilds(saved.builds)) || (saved.settings !== undefined && !isRecord(saved.settings))) throw new Error('The saved workshop data has an unsupported format.');
       if (saved.version < 3) for (const p of saved.projects) for (const part of p.parts || []) {
         if (part.materialId) { delete part.width; delete part.thickness; }
         else if (part.width !== undefined || part.thickness !== undefined) { part.legacyDimensions = { width: part.width, thickness: part.thickness }; delete part.width; delete part.thickness; }
       }
-      const result = { version: STATE_VERSION, projects: saved.projects, materials: Array.isArray(saved.materials) ? saved.materials : [], builds: Array.isArray(saved.builds) ? saved.builds : [], settings: { ...DEFAULT_SETTINGS, ...(saved.settings || {}) } };
+      const result = { version: STATE_VERSION, projects: saved.projects, materials: Array.isArray(saved.materials) ? saved.materials : [], builds: Array.isArray(saved.builds) ? saved.builds : [], settings: normalizedSettings(saved.settings) };
       if (!['inches', 'metric'].includes(result.settings.units)) result.settings.units = 'inches';
       if (!['fraction', 'decimal'].includes(result.settings.numberFormat)) result.settings.numberFormat = 'fraction';
       if (!Number.isFinite(Number(result.settings.kerf)) || Number(result.settings.kerf) < 0) result.settings.kerf = DEFAULT_SETTINGS.kerf;
       result.settings.kerf = Number(result.settings.kerf);
-      if (saved.version !== STATE_VERSION || !Array.isArray(saved.materials) || !Array.isArray(saved.builds) || !saved.settings || !Number.isFinite(Number(saved.settings.kerf))) {
+      if (saved.version !== STATE_VERSION || !Array.isArray(saved.materials) || !Array.isArray(saved.builds) || !saved.settings || !Number.isFinite(Number(saved.settings.kerf)) || !isRecord(saved.settings.branding)) {
         try { localStorage.setItem(key, JSON.stringify(result)); }
         catch (error) { storageDirty = true; storageBlocked = true; storageBlockedReason = 'migration'; loadProblem = 'Saved workshop data was read, but its upgrade could not be saved. Writing is paused to protect the original copy.'; console.warn('Workshop data loaded but its migration could not be saved; future writes are paused to protect the original copy.', error); }
       }
@@ -68,16 +87,17 @@
   function setCloudStatus(message) { cloudStatus = message; const target = $('[data-cloud-status]'); if (target) target.textContent = message; }
   function hasWorkshopRecords(value) {
     const settings = value?.settings || DEFAULT_SETTINGS;
-    return !!(value?.projects?.length || value?.materials?.length || value?.builds?.length || settings.units !== DEFAULT_SETTINGS.units || settings.numberFormat !== DEFAULT_SETTINGS.numberFormat || Number(settings.kerf) !== DEFAULT_SETTINGS.kerf);
+    const hasBranding = JSON.stringify(normalizedBranding(settings.branding)) !== JSON.stringify(DEFAULT_BRANDING);
+    return !!(value?.projects?.length || value?.materials?.length || value?.builds?.length || settings.units !== DEFAULT_SETTINGS.units || settings.numberFormat !== DEFAULT_SETTINGS.numberFormat || Number(settings.kerf) !== DEFAULT_SETTINGS.kerf || hasBranding);
   }
   function normalizeCloudData(value) {
-    if (!isRecord(value) || ![1, 2, 3, 4, 5, 6, 7, 8].includes(value.version) || !validProjects(value.projects) || !validProjectBuilds(value.projects) || (value.materials !== undefined && !validMaterials(value.materials)) || (value.builds !== undefined && !validBuilds(value.builds)) || (value.settings !== undefined && !isRecord(value.settings))) throw new Error('The cloud workshop data has an unsupported format. Your local data was left unchanged.');
+    if (!isRecord(value) || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(value.version) || !validProjects(value.projects) || !validProjectBuilds(value.projects) || (value.materials !== undefined && !validMaterials(value.materials)) || (value.builds !== undefined && !validBuilds(value.builds)) || (value.settings !== undefined && !isRecord(value.settings))) throw new Error('The cloud workshop data has an unsupported format. Your local data was left unchanged.');
     const projects = structuredClone(value.projects), materials = structuredClone(value.materials || []), builds = structuredClone(value.builds || []);
     if (value.version < 3) for (const p of projects) for (const part of p.parts || []) {
       if (part.materialId) { delete part.width; delete part.thickness; }
       else if (part.width !== undefined || part.thickness !== undefined) { part.legacyDimensions = { width: part.width, thickness: part.thickness }; delete part.width; delete part.thickness; }
     }
-    const settings = { ...DEFAULT_SETTINGS, ...(value.settings || {}) };
+    const settings = normalizedSettings(value.settings);
     if (!['inches', 'metric'].includes(settings.units)) settings.units = DEFAULT_SETTINGS.units;
     if (!['fraction', 'decimal'].includes(settings.numberFormat)) settings.numberFormat = DEFAULT_SETTINGS.numberFormat;
     if (!Number.isFinite(Number(settings.kerf)) || Number(settings.kerf) < 0) settings.kerf = DEFAULT_SETTINGS.kerf;
@@ -91,10 +111,11 @@
   }
   function applyCloudSnapshot(snapshot, announce = true) {
     if (!authUserId) return;
-    state = normalizeCloudData(snapshot.data);
-    storageBlocked = false; storageDirty = false; storageBlockedReason = ''; loadProblem = '';
-    localStorage.setItem(activeStoreKey(), JSON.stringify(state));
+    const nextState = normalizeCloudData(snapshot.data);
+    localStorage.setItem(activeStoreKey(), JSON.stringify(nextState));
     localStorage.setItem(LEGACY_CLAIM_KEY, authUserId);
+    state = nextState;
+    storageBlocked = false; storageDirty = false; storageBlockedReason = ''; loadProblem = '';
     rememberCloudBase(state, Number(snapshot.revision));
     cloudConflict = null;
     setCloudStatus(`Synced · ${new Date(snapshot.updated_at).toLocaleString()}`);
@@ -209,9 +230,9 @@
   }
   function chooseCloudCopy() {
     if (!cloudConflict) return;
-    if (hasWorkshopRecords(state) && !confirm('Replace this device’s workshop with the cloud copy? A backup of this device’s current data will be downloaded first.')) return;
-    if (hasWorkshopRecords(state)) exportData();
-    applyCloudSnapshot(cloudConflict);
+    const remote = cloudConflict;
+    try { applyCloudSnapshot(remote); }
+    catch (error) { setCloudStatus('Cloud copy could not be saved on this device'); toast(error.message || 'Could not apply the cloud copy. Check device storage and try again.', true); }
   }
   async function chooseDeviceCopy() {
     if (!cloudConflict) return;
@@ -292,6 +313,20 @@
   function projectMaterialAllocation(p, materialId) { return Number(p.materialAllocations?.find(item => item.materialId === materialId)?.quantity) || 0; }
   function assignedMaterialCount(materialId) { return state.projects.filter(p => !p.archived && p.status !== 'complete').reduce((sum, p) => sum + projectMaterialAllocation(p, materialId), 0); }
   function unitName() { return state.settings.units === 'metric' ? 'mm' : 'inches'; }
+  function applyWorkspaceAppearance() {
+    const branding = normalizedBranding(state.settings.branding), root = document.documentElement;
+    root.style.setProperty('--green', branding.primaryColor);
+    root.style.setProperty('--green2', branding.secondaryColor);
+    root.style.setProperty('--canvas', branding.backgroundColor);
+    root.style.setProperty('--paper', branding.surfaceColor);
+    root.style.setProperty('--ink', branding.textColor);
+    const themeColor = $('meta[name="theme-color"]'); if (themeColor) themeColor.content = branding.primaryColor;
+    const brand = $('.brand'), mark = $('.brand-mark'), avatar = $('.avatar'), shopLabel = branding.shopName || 'WORKSHOP';
+    if (brand) { brand.setAttribute('aria-label', `${BRAND.name} · ${branding.shopName || 'Workshop'} dashboard`); const small = $('small', brand); if (small) small.textContent = shopLabel.toUpperCase(); }
+    if (mark) mark.innerHTML = branding.logoDataUrl ? `<img class="workspace-logo" src="${branding.logoDataUrl}" alt="">` : '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 8.5 16 3l10 5.5v15L16 29 6 23.5z"/><path d="M6 8.5 16 14l10-5.5M16 14v15M11 5.8l10 5.5"/></svg>';
+    if (avatar) { const name = branding.personalName || branding.shopName || BRAND.shortName; avatar.innerHTML = branding.logoDataUrl ? `<img class="workspace-avatar-logo" src="${branding.logoDataUrl}" alt="">` : esc(name.trim().split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase()); avatar.setAttribute('aria-label', name); }
+    const localName = $('.local-status strong'); if (localName) localName.textContent = branding.shopName || 'Your workshop';
+  }
   function roundText(n, places = 4) { return Number(Number(n).toFixed(places)).toString(); }
   function parseMeasurement(value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -451,7 +486,45 @@
     return `${heading('WORKSHOP TOOLS', 'Cut calculator', `Add or subtract shop measurements in ${unitName()}.`)}<section class="calculator-panel"><div class="calc-content"><div><div class="field"><label class="field-label" for="calc-first">First measurement (${unitName()})</label><input class="field-input" id="calc-first" placeholder="${state.settings.units === 'metric' ? '285.75' : frac ? '11 1/4″' : '11.25'}"></div><div class="field"><label class="field-label" for="calc-operation">Operation</label><select id="calc-operation" class="field-select"><option value="add">Add (+)</option><option value="subtract">Subtract (−)</option></select></div><div class="field"><label class="field-label" for="calc-second">Second measurement (${unitName()})</label><input class="field-input" id="calc-second" placeholder="${state.settings.units === 'metric' ? '19.05' : frac ? '3/4″' : '0.75'}"></div><button class="button button-primary" data-action="calculate">Calculate</button></div><div class="calc-output"><p class="eyebrow">RESULT</p><div id="calc-result" class="calc-result">—</div><div id="calc-decimal" class="subtle">Enter two measurements to start</div><div class="cut-list-note">Results display in ${unitName()}.</div></div></div></section>`;
   }
   function renderSettings() {
-    return `${heading('YOUR WORKSPACE', 'Settings', 'Workshop data stays available offline and syncs to your private account when connected.')}<section class="settings-panel cloud-panel"><div class="cloud-panel-heading"><div><strong>Cloud sync</strong><p>Each account has its own private workshop. Device changes save locally first.</p></div><span class="offline-pill"><span class="status-dot"></span><span data-cloud-status>${esc(cloudStatus)}</span></span></div>${!cloudAvailable ? '<p class="panel-subtitle">The Windows file launcher is offline-only. Open BenchPilot from its HTTPS Pages address to sign in and sync.</p>' : authUser ? `<div class="cloud-account-row"><div><strong>${esc(authUser.email || 'Signed-in account')}</strong><p>Signed in. This device saves to your account’s private workshop.</p></div><div class="detail-actions"><button class="button button-secondary button-small" data-action="sync-now">Sync now</button><button class="button button-secondary button-small" data-action="cloud-sign-out">Sign out</button></div></div>` : `<form class="cloud-auth-form" data-cloud-auth><label>Email<input class="field-input" type="email" name="email" autocomplete="username" required></label><label>Password<input class="field-input" type="password" name="password" autocomplete="current-password" minlength="6" required></label><div class="detail-actions"><button class="button button-primary" type="submit" data-auth-mode="signin">Sign in</button><button class="button button-secondary" type="submit" data-auth-mode="signup">Create account</button></div></form>`}${cloudConflict ? `<div class="cloud-conflict" role="alert"><strong>Choose which workshop copy to keep</strong><p>This device and the cloud have different changes. Choosing one replaces the other copy; a local backup is downloaded before using the cloud copy.</p><div class="detail-actions"><button class="button button-secondary" data-action="use-cloud-copy">Use cloud copy</button><button class="button button-primary" data-action="keep-device-copy">Keep this device’s copy</button></div></div>` : ''}</section><section class="settings-panel settings-stack"><div class="setting-row"><div><strong>Measurement units</strong><p>Choose the units for dimensions across the workshop.</p></div><select class="filter-select" data-setting="units"><option value="inches" ${state.settings.units === 'inches' ? 'selected' : ''}>Inches</option><option value="metric" ${state.settings.units === 'metric' ? 'selected' : ''}>Metric (mm)</option></select></div><div class="setting-row"><div><strong>Measurement display</strong><p>${state.settings.units === 'metric' ? 'Metric dimensions display as decimals.' : 'Choose fractions or decimal inches.'}</p></div><select class="filter-select" data-setting="numberFormat" ${state.settings.units === 'metric' ? 'disabled' : ''}><option value="fraction" ${state.settings.numberFormat === 'fraction' ? 'selected' : ''}>Fractions</option><option value="decimal" ${state.settings.numberFormat === 'decimal' ? 'selected' : ''}>Decimals</option></select></div><div class="setting-row"><div><strong>Back up your workshop</strong><p>Save projects, materials, builds, version history, parts, and notes to a JSON file.</p></div><button class="button button-secondary" data-action="export">Download backup</button></div><div class="setting-row"><div><strong>Restore from a backup</strong><p>Load a BenchPilot or Jabo Workshop JSON backup from this device.</p></div><button class="button button-secondary" data-action="import">Choose file</button></div><div class="setting-row"><div><strong>Stored on this device</strong><p>${state.projects.length} projects · ${state.materials.length} stock items · ${state.builds.length} builds</p></div><span class="offline-pill"><span class="status-dot"></span>Local</span></div></section>`;
+    const branding = normalizedBranding(state.settings.branding), accountStatus = cloudConflict ? 'Sync paused · choose a workshop copy' : authUser ? `Signed in as ${authUser.email || 'your account'}` : cloudAvailable ? 'Sign in to sync across devices' : 'Offline-only on this launch';
+    return `${heading('YOUR WORKSPACE', 'Settings', 'Manage your shop, account, and app controls.')}<section class="settings-home-grid"><button class="settings-home-card" data-page="account"><span class="settings-home-icon">◉</span><span><strong>Shop & account</strong><small>${esc(branding.shopName || 'Personalize your workshop')} · ${esc(accountStatus)}</small></span><span class="settings-card-arrow">→</span></button><button class="settings-home-card" data-page="preferences"><span class="settings-home-icon">⚙</span><span><strong>App controls</strong><small>${state.settings.units === 'metric' ? 'Millimeters' : 'Inches'} · ${state.settings.units === 'metric' ? 'Decimal display' : state.settings.numberFormat === 'fraction' ? 'Fractions' : 'Decimal display'} · cut defaults</small></span><span class="settings-card-arrow">→</span></button></section><section class="settings-note"><strong>Your data stays yours</strong><p>Projects and workshop settings save on this device first. When signed in, changes sync to your private account when a connection is available.</p></section>`;
+  }
+  function renderPreferences() {
+    return `<button class="text-link detail-back" data-page="settings">← Back to settings</button>${heading('APP CONTROLS', 'Measurements & defaults', 'Choose how BenchPilot handles dimensions and cut planning.')}<section class="settings-panel settings-stack"><div class="setting-row"><div><strong>Measurement units</strong><p>Choose the units used to enter and display dimensions.</p></div><select class="filter-select" data-setting="units"><option value="inches" ${state.settings.units === 'inches' ? 'selected' : ''}>Inches</option><option value="metric" ${state.settings.units === 'metric' ? 'selected' : ''}>Metric (mm)</option></select></div><div class="setting-row"><div><strong>Measurement display</strong><p>${state.settings.units === 'metric' ? 'Metric dimensions display as decimals.' : 'Choose fractions or decimal inches.'}</p></div><select class="filter-select" data-setting="numberFormat" ${state.settings.units === 'metric' ? 'disabled' : ''}><option value="fraction" ${state.settings.numberFormat === 'fraction' ? 'selected' : ''}>Fractions</option><option value="decimal" ${state.settings.numberFormat === 'decimal' ? 'selected' : ''}>Decimals</option></select></div><div class="setting-row"><div><strong>Default saw kerf</strong><p>Used for new projects and as the starting value for cut planning.</p></div><label class="setting-input-with-unit"><input class="tolerance-input" type="text" inputmode="decimal" value="${esc(inputMeasure(state.settings.kerf))}" data-setting="kerf" aria-label="Default saw kerf"><span>${unitName()}</span></label></div></section>`;
+  }
+  function renderCloudAccountPanel() {
+    return `<section class="settings-panel cloud-panel"><div class="cloud-panel-heading"><div><strong>Cloud sync</strong><p>Each account has a private workshop copy. Changes save locally before they sync.</p></div><span class="offline-pill"><span class="status-dot"></span><span data-cloud-status>${esc(cloudStatus)}</span></span></div>${!cloudAvailable ? '<p class="panel-subtitle">This launch is offline-only. Open BenchPilot from its HTTPS Pages address to sign in and sync.</p>' : authUser ? `<div class="cloud-account-row"><div><strong>${esc(authUser.email || 'Signed-in account')}</strong><p>This device is connected to your private workshop.</p></div><div class="detail-actions"><button class="button button-secondary button-small" data-action="sync-now">Sync now</button><button class="button button-secondary button-small" data-action="cloud-sign-out">Sign out</button></div></div>` : `<form class="cloud-auth-form" data-cloud-auth><label>Email<input class="field-input" type="email" name="email" autocomplete="username" required></label><label>Password<input class="field-input" type="password" name="password" autocomplete="current-password" minlength="6" required></label><div class="detail-actions"><button class="button button-primary" type="submit" data-auth-mode="signin">Sign in</button><button class="button button-secondary" type="submit" data-auth-mode="signup">Create account</button></div></form>`}${cloudConflict ? `<div class="cloud-conflict" role="alert"><strong>Choose which workshop copy to keep</strong><p>Using the cloud copy replaces the workshop saved on this device. Download a manual backup first if you want to keep a separate copy.</p><div class="detail-actions"><button class="button button-secondary" data-action="use-cloud-copy">Use cloud copy</button><button class="button button-primary" data-action="keep-device-copy">Keep this device’s copy</button></div></div>` : ''}</section>`;
+  }
+  function renderAccount() {
+    const branding = normalizedBranding(state.settings.branding), initials = branding.personalName || branding.shopName || 'Your shop';
+    const logoPreview = branding.logoDataUrl ? `<img class="account-logo-preview" src="${branding.logoDataUrl}" alt="Current shop logo">` : `<span class="account-logo-placeholder">${esc(initials.split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase())}</span>`;
+    const colorFields = [['primaryColor', 'Primary color'], ['secondaryColor', 'Secondary color'], ['backgroundColor', 'Page background'], ['surfaceColor', 'Panel background'], ['textColor', 'Text color']].map(([key, label]) => `<label class="color-setting"><span>${label}</span><input type="color" value="${branding[key]}" data-brand-color="${key}" aria-label="${label}"></label>`).join('');
+    const schemes = [['forest', 'Forest'], ['ocean', 'Ocean'], ['clay', 'Clay'], ['slate', 'Slate']].map(([key, label]) => `<button class="palette-option" type="button" data-action="apply-palette" data-id="${key}" aria-label="Apply ${label} color scheme"><span style="--palette-primary:${COLOR_SCHEMES[key].primaryColor};--palette-secondary:${COLOR_SCHEMES[key].secondaryColor}"></span>${label}</button>`).join('');
+    return `<button class="text-link detail-back" data-page="settings">← Back to settings</button>${heading('YOUR WORKSPACE', 'Shop & account', 'Make BenchPilot feel like your own workshop.')}<section class="account-identity-card"><div class="account-logo-frame">${logoPreview}</div><div><p class="eyebrow">WORKSPACE PROFILE</p><h2>${esc(branding.shopName || 'Your shop name')}</h2><p>${esc(branding.personalName || 'Add your name')} · ${esc(authUser?.email || 'Local profile')}</p></div></section><section class="settings-panel account-panel"><div class="account-section-heading"><div><h2>Workshop identity</h2><p>These details personalize the app on your devices.</p></div></div><form id="workshop-profile-form"><div class="field-grid"><div class="field"><label class="field-label" for="shop-name">Shop name</label><input class="field-input" id="shop-name" name="shopName" maxlength="80" placeholder="Mane & Grain Workshop" value="${esc(branding.shopName)}"></div><div class="field"><label class="field-label" for="personal-name">Your name</label><input class="field-input" id="personal-name" name="personalName" maxlength="80" placeholder="Your name" value="${esc(branding.personalName)}"></div></div><div class="field logo-upload-field"><label class="field-label" for="shop-logo">Shop logo</label><div class="logo-upload-row"><input class="field-input" id="shop-logo" type="file" accept="image/png,image/jpeg,image/webp" data-logo-upload><small>PNG, JPEG, or WebP. The image is resized and synced as part of your workshop profile.</small>${branding.logoDataUrl ? '<button class="button button-quiet button-small" type="button" data-action="remove-shop-logo">Remove logo</button>' : ''}</div></div><div class="detail-actions"><button class="button button-primary" type="submit">Save profile</button></div></form></section><section class="settings-panel account-panel"><div class="account-section-heading"><div><h2>Color scheme</h2><p>Pick a starting palette, then adjust each color.</p></div></div><div class="palette-options">${schemes}</div><div class="color-settings-grid">${colorFields}</div></section>${renderCloudAccountPanel()}<section class="settings-panel settings-stack"><div class="account-section-heading"><div><h2>Backups & device data</h2><p>Backups include projects, materials, builds, notes, and your workshop profile.</p></div></div><div class="setting-row"><div><strong>Download a backup</strong><p>Save a portable JSON copy of this device’s workshop.</p></div><button class="button button-secondary" data-action="export">Download backup</button></div><div class="setting-row"><div><strong>Restore a backup</strong><p>Load a BenchPilot or Jabo Workshop backup. The current data is backed up first.</p></div><button class="button button-secondary" data-action="import">Choose file</button></div><div class="setting-row"><div><strong>This device</strong><p>${state.projects.length} projects · ${state.materials.length} stock items · ${state.builds.length} builds</p></div><span class="offline-pill"><span class="status-dot"></span>Saved locally</span></div></section>`;
+  }
+  function applyColorScheme(id) {
+    if (!Object.hasOwn(COLOR_SCHEMES, id)) return;
+    const previous = structuredClone(normalizedBranding(state.settings.branding));
+    state.settings.branding = { ...previous, ...COLOR_SCHEMES[id] };
+    if (!save()) { state.settings.branding = previous; renderApp(); return; }
+    renderApp(); toast('Color scheme saved.');
+  }
+  async function saveWorkshopLogo(file) {
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) { toast('Choose a PNG, JPEG, or WebP image smaller than 5 MB.', true); renderApp(); return; }
+    const previous = structuredClone(normalizedBranding(state.settings.branding));
+    try {
+      const bitmap = await createImageBitmap(file), scale = Math.min(1, 512 / bitmap.width, 240 / bitmap.height), canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext('2d'); if (!context) throw new Error('Image processing is unavailable in this browser.');
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close?.();
+      let dataUrl = canvas.toDataURL('image/webp', 0.86);
+      if (!dataUrl.startsWith('data:image/webp;')) dataUrl = canvas.toDataURL('image/png');
+      if (dataUrl.length > 650000) throw new Error('That logo is still too large after resizing. Choose a simpler or smaller image.');
+      state.settings.branding = { ...previous, logoDataUrl: dataUrl };
+      if (!save()) { state.settings.branding = previous; renderApp(); return; }
+      renderApp(); toast('Shop logo saved to your workshop.');
+    } catch (error) { state.settings.branding = previous; renderApp(); toast(error.message || 'Could not read that logo image.', true); }
   }
   function renderProjectDetail(p) {
     const parts = allProjectParts(p), tolerance = Number(p.cutTolerance) || 0, kerf = Number(p.cutKerf ?? state.settings.kerf) || 0;
@@ -479,16 +552,7 @@
     return `<button class="text-link detail-back" data-page="projects">← Back to projects</button><section class="detail-top"><div><p class="eyebrow">PROJECT DETAILS</p><h1 class="detail-title">${esc(p.name)}</h1><div style="margin-bottom:10px">${statusBadge(p.status)}${p.archived ? ' <span class="status-badge complete">Archived</span>' : ''}</div><p class="detail-copy">${esc(p.description || 'No description yet.')}</p></div><div class="detail-actions"><button class="button button-secondary button-small" data-action="edit-project" data-id="${esc(p.id)}">Edit project</button><button class="button button-secondary button-small" data-action="archive-project" data-id="${esc(p.id)}">${p.archived ? 'Restore project' : 'Archive project'}</button></div></section><div class="detail-panels">${materialPanel}${projectBuildPanel}<section class="detail-panel"><div class="detail-panel-header"><h2 class="detail-panel-title">Project parts</h2><button class="button button-primary button-small" data-action="new-part" data-id="${esc(p.id)}">＋ Add part</button></div>${partRows}</section><section class="detail-panel cut-plan-panel"><div class="detail-panel-header cut-plan-heading"><div><h2 class="detail-panel-title">Optimized cut list</h2><p class="panel-subtitle">Cuts are packed together across board length and width. Drawings run the stock length horizontally.</p></div><div class="cut-plan-controls"><label class="visualization-toggle"><input type="checkbox" data-cut-visualization ${p.showCutVisualization?'checked':''}><span>Show cut drawing</span></label><div class="tolerance-control"><label class="field-label" for="cut-tolerance">Length allowance (${unitName()})</label><input id="cut-tolerance" class="tolerance-input" type="text" inputmode="decimal" value="${esc(inputMeasure(tolerance))}" data-cut-tolerance><small>Reserved uncut at the end of each board or sheet.</small></div><div class="tolerance-control"><label class="field-label" for="cut-width-tolerance">Width allowance (${unitName()})</label><input id="cut-width-tolerance" class="tolerance-input" type="text" inputmode="decimal" value="${esc(inputMeasure(widthTolerance))}" data-cut-width-tolerance><small>Reserved uncut along one side of each board or sheet.</small></div><div class="kerf-control"><label class="field-label" for="cut-kerf">Saw kerf (${unitName()})</label><input id="cut-kerf" class="tolerance-input" type="text" inputmode="decimal" value="${esc(inputMeasure(kerf))}" data-cut-kerf><small>Adjust for the blade installed for this project.</small></div></div></div><div class="cut-plan-list">${boardPlan}</div><div class="cut-list-note">A ${displayMeasure(kerf)} kerf is allowed between neighboring cuts. Length and width allowances are excluded from usable stock. Grain direction, angled cuts, and saved offcuts are not tracked.</div><div class="print-project-action"><button class="button button-secondary button-small" data-action="print">Print project materials and cut plan</button></div></section><section class="detail-panel"><div class="detail-panel-header"><h2 class="detail-panel-title">Project notes</h2><button class="button button-secondary button-small" data-action="edit-project" data-id="${esc(p.id)}">Edit notes</button></div><div class="notes-display">${esc(p.notes || 'No notes yet.')}</div></section></div>`;
   }
   function render() {
-    const p = currentProjectId ? project(currentProjectId) : null; if (!p) currentProjectId = null;
-    const b = currentBuildId ? build(currentBuildId) : null; if (!b) currentBuildId = null;
-    $('#breadcrumb-current').textContent = p ? 'Projects / Project details' : b ? 'Builds / Build details' : ({ dashboard: 'Dashboard', projects: 'Projects', builds: 'Builds', materials: 'Materials', calculator: 'Cut calculator', settings: 'Settings' })[currentPage];
-    $('#project-count').textContent = state.projects.filter(x => !x.archived && x.status !== 'complete').length;
-    $$('.nav-item[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === currentPage));
-    const content = p ? renderProjectDetail(p) : b ? renderBuilds() : ({ dashboard: renderDashboard, projects: renderProjects, builds: renderBuilds, materials: renderMaterials, calculator: renderCalculator, settings: renderSettings })[currentPage]();
-    const saveWarning = storageBlocked
-      ? `<div class="storage-warning" role="alert"><strong>Saved data could not be read.</strong><p>The original browser copy is preserved. Download a recovery copy before restoring a backup.</p><button class="button button-secondary button-small" data-action="export-recovery">Download recovery copy</button><button class="button button-secondary button-small" data-action="import">Restore from backup</button></div>`
-      : storageDirty ? `<div class="storage-warning" role="alert"><strong>Some changes may not be saved.</strong><p>Download a backup before closing this window, then check available browser storage.</p><button class="button button-secondary button-small" data-action="export">Download backup</button></div>` : '';
-    $('#page-content').innerHTML = `${saveWarning}${content}`;
+    renderApp();
   }
 
   function openModal(html) { $('#modal-root').innerHTML = `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true">${html}</section></div>`; $('input:not([type=hidden]),select,textarea', $('#modal-root'))?.focus(); }
@@ -532,14 +596,18 @@
     document.title = BRAND.name;
     const brand = $('.brand');
     if (brand) { brand.setAttribute('aria-label', `${BRAND.name} dashboard`); $('strong', brand).textContent = BRAND.shortName; }
+    applyWorkspaceAppearance();
     const status = $('#data-save-status');
     if (status) status.textContent = storageBlocked ? 'Saved copy needs recovery' : storageDirty ? 'Changes not confirmed saved' : 'Saved on this device';
     const p = currentProjectId ? project(currentProjectId) : null; if (currentProjectId && !p) currentProjectId = null;
     const b = currentBuildId ? build(currentBuildId) : null; if (currentBuildId && !b) currentBuildId = null;
-    $('#breadcrumb-current').textContent = p ? 'Projects / Project details' : b ? 'Builds / Build details' : ({ dashboard: 'Dashboard', projects: 'Projects', builds: 'Builds', materials: 'Materials', calculator: 'Cut calculator', settings: 'Settings' })[currentPage];
+    const breadcrumb = { dashboard: 'Dashboard', projects: 'Projects', builds: 'Builds', materials: 'Materials', calculator: 'Cut calculator', settings: 'Settings', account: 'Settings / Shop & account', preferences: 'Settings / App controls' };
+    $('#breadcrumb-current').textContent = p ? 'Projects / Project details' : b ? 'Builds / Build details' : breadcrumb[currentPage] || 'Settings';
     $('#project-count').textContent = state.projects.filter(x => !x.archived && x.status !== 'complete').length;
-    $$('.nav-item[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === currentPage));
-    const content = p ? renderProjectDetail(p) : b ? renderBuilds() : ({ dashboard: renderDashboard, projects: renderProjects, builds: renderBuilds, materials: renderMaterials, calculator: renderCalculator, settings: renderSettings })[currentPage]();
+    const navPage = ['settings', 'account', 'preferences'].includes(currentPage) ? 'settings' : currentPage;
+    $$('.nav-item[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === navPage));
+    const pageRenderers = { dashboard: renderDashboard, projects: renderProjects, builds: renderBuilds, materials: renderMaterials, calculator: renderCalculator, settings: renderSettings, account: renderAccount, preferences: renderPreferences };
+    const content = p ? renderProjectDetail(p) : b ? renderBuilds() : (pageRenderers[currentPage] || renderSettings)();
     const saveWarning = storageBlocked
       ? storageBlockedReason === 'migration'
         ? `<div class="storage-warning" role="alert"><strong>Saved data could not be upgraded yet.</strong><p>The original browser copy is preserved and writing is paused. Download a recovery copy, resolve the browser storage issue, then reopen the app; you can also restore a backup.</p><button class="button button-secondary button-small" data-action="export-recovery">Download recovery copy</button><button class="button button-secondary button-small" data-action="import">Restore from backup</button></div>`
@@ -548,7 +616,15 @@
     $('#page-content').innerHTML = `${saveWarning}${content}`;
   }
   const root = $('#page-content');
-  root.addEventListener('submit', e => { if (e.target.matches('[data-cloud-auth]')) submitCloudAuth(e); });
+  root.addEventListener('submit', e => {
+    if (e.target.matches('[data-cloud-auth]')) { submitCloudAuth(e); return; }
+    if (e.target.id !== 'workshop-profile-form') return;
+    e.preventDefault();
+    const form = new FormData(e.target), previous = structuredClone(normalizedBranding(state.settings.branding));
+    state.settings.branding = { ...previous, shopName: String(form.get('shopName') || '').trim().slice(0, 80), personalName: String(form.get('personalName') || '').trim().slice(0, 80) };
+    if (!save()) { state.settings.branding = previous; renderApp(); return; }
+    renderApp(); toast('Workshop profile saved.');
+  });
   root.addEventListener('click', e => {
     const pageBtn = e.target.closest('[data-page]'); if (pageBtn) { const page = pageBtn.dataset.page; requestBuildExit(() => { currentProjectId = null; currentBuildId = null; currentPage = page; renderApp(); }); return; }
     const openBuild = e.target.closest('[data-open-build]'); if (openBuild) { const id = openBuild.dataset.openBuild; requestBuildExit(() => { currentBuildId = id; currentProjectId = null; currentPage = 'builds'; renderApp(); }); return; }
@@ -559,6 +635,8 @@
     else if (action === 'sync-now') syncCloudNow();
     else if (action === 'use-cloud-copy') chooseCloudCopy();
     else if (action === 'keep-device-copy') chooseDeviceCopy();
+    else if (action === 'apply-palette') applyColorScheme(id);
+    else if (action === 'remove-shop-logo') { const previous = structuredClone(normalizedBranding(state.settings.branding)); state.settings.branding = { ...previous, logoDataUrl: '' }; if (!save()) state.settings.branding = previous; renderApp(); }
     else if (action === 'new-project') projectModal();
     else if (action === 'new-build') buildModal();
     else if (action === 'edit-build' && build(id)) buildModal(build(id));
@@ -598,9 +676,11 @@
   });
   $('.sidebar').addEventListener('click', e => { const b = e.target.closest('.nav-item[data-page]'); if (b) { const page = b.dataset.page; requestBuildExit(() => { currentPage = page; currentProjectId = null; currentBuildId = null; renderApp(); }); } });
   root.addEventListener('change', e => {
+    if (e.target.matches('[data-logo-upload]')) { const file = e.target.files?.[0]; e.target.value = ''; if (file) saveWorkshopLogo(file); return; }
+    if (e.target.matches('[data-brand-color]')) { const key = e.target.dataset.brandColor; if (!['primaryColor', 'secondaryColor', 'backgroundColor', 'surfaceColor', 'textColor'].includes(key) || !/^#[0-9a-f]{6}$/i.test(e.target.value)) return; const previous = structuredClone(normalizedBranding(state.settings.branding)); state.settings.branding = { ...previous, [key]: e.target.value }; if (!save()) { state.settings.branding = previous; renderApp(); return; } renderApp(); return; }
     if (e.target.matches('[data-cut-tolerance]') || e.target.matches('[data-cut-width-tolerance]')) { const p = project(currentProjectId), value = parseInput(e.target.value); if (!p || value === null || value < 0) { toast('Enter a non-negative stock allowance in the selected units.', true); renderApp(); return; } if (e.target.matches('[data-cut-width-tolerance]')) p.cutWidthTolerance = value; else p.cutTolerance = value; touch(p); const saved = save(); renderApp(); if (saved) toast('Cut allowance saved. Cut layouts updated.'); return; }
     if (e.target.matches('[data-cut-kerf]')) { const p = project(currentProjectId), value = parseInput(e.target.value); if (!p || value === null || value < 0) { toast('Enter a non-negative kerf for the installed blade.', true); renderApp(); return; } p.cutKerf = value; touch(p); const saved = save(); renderApp(); if (saved) toast('Project kerf saved. Cut layout updated.'); return; }
-    if (e.target.matches('[data-setting]')) { const k = e.target.dataset.setting; if (k === 'units' && ['inches', 'metric'].includes(e.target.value)) state.settings.units = e.target.value; else if (k === 'numberFormat' && ['fraction', 'decimal'].includes(e.target.value) && state.settings.units === 'inches') state.settings.numberFormat = e.target.value; save(); renderApp(); return; }
+    if (e.target.matches('[data-setting]')) { const k = e.target.dataset.setting; if (k === 'units' && ['inches', 'metric'].includes(e.target.value)) state.settings.units = e.target.value; else if (k === 'numberFormat' && ['fraction', 'decimal'].includes(e.target.value) && state.settings.units === 'inches') state.settings.numberFormat = e.target.value; else if (k === 'kerf') { const value = parseInput(e.target.value); if (value === null || value < 0) { toast('Enter a non-negative default saw kerf.', true); renderApp(); return; } state.settings.kerf = value; } else return; save(); renderApp(); return; }
     if (e.target.matches('[data-cut-visualization]')) { const p = project(currentProjectId); if (p) { p.showCutVisualization = e.target.checked; touch(p); save(); renderApp(); } return; }
     if (e.target.matches('[data-material-type-filter]')) { materialTypeFilter = e.target.value; renderApp(); return; }
     if (e.target.matches('[data-material-thickness-filter]')) { materialThicknessFilter = e.target.value; renderApp(); return; }
@@ -625,7 +705,7 @@
     const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
     try {
       const x = JSON.parse(await f.text());
-      if (!isRecord(x) || ![1, 2, 3, 4, 5, 6, 7, 8].includes(x.version) || !validProjects(x.projects) || !validProjectBuilds(x.projects) || (x.materials !== undefined && !validMaterials(x.materials)) || (x.builds !== undefined && !validBuilds(x.builds)) || (x.settings !== undefined && !isRecord(x.settings))) throw new Error('This file is not a supported BenchPilot or Jabo Workshop backup, or one of its records is incomplete. Your current data was not changed.');
+      if (!isRecord(x) || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(x.version) || !validProjects(x.projects) || !validProjectBuilds(x.projects) || (x.materials !== undefined && !validMaterials(x.materials)) || (x.builds !== undefined && !validBuilds(x.builds)) || (x.settings !== undefined && !isRecord(x.settings))) throw new Error('This file is not a supported BenchPilot or Jabo Workshop backup, or one of its records is incomplete. Your current data was not changed.');
       if (!confirm(`Replace local data with ${x.projects.length} projects, ${x.materials?.length || 0} materials, and ${x.builds?.length || 0} builds? A copy of the current data will download first.`)) return;
       if (storageBlocked) exportRecoveryData(); else downloadText(JSON.stringify({ ...state, app: BRAND.name, exportedAt: new Date().toISOString() }, null, 2), `benchpilot-pre-restore-${new Date().toISOString().slice(0, 10)}.json`);
       if (x.version < 3) for (const p of x.projects) for (const part of p.parts || []) {
@@ -633,7 +713,7 @@
         else if (part.width !== undefined || part.thickness !== undefined) { part.legacyDimensions = { width: part.width, thickness: part.thickness }; delete part.width; delete part.thickness; }
       }
       const previousState = state, previousBlocked = storageBlocked, previousDirty = storageDirty;
-      state = { version: STATE_VERSION, projects: x.projects, materials: x.materials || [], builds: x.builds || [], settings: { ...DEFAULT_SETTINGS, ...(x.settings || {}) } };
+      state = { version: STATE_VERSION, projects: x.projects, materials: x.materials || [], builds: x.builds || [], settings: normalizedSettings(x.settings) };
       if (!['inches', 'metric'].includes(state.settings.units)) state.settings.units = DEFAULT_SETTINGS.units;
       if (!['fraction', 'decimal'].includes(state.settings.numberFormat)) state.settings.numberFormat = DEFAULT_SETTINGS.numberFormat;
       if (!Number.isFinite(Number(state.settings.kerf)) || Number(state.settings.kerf) < 0) state.settings.kerf = DEFAULT_SETTINGS.kerf;
