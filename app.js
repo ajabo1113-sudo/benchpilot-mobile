@@ -80,11 +80,36 @@
     } catch (error) { storageBlocked = true; storageBlockedReason = 'read'; loadProblem = error.message || 'Saved workshop data could not be read.'; console.warn('Could not read saved workshop data. The original copy was left untouched.', error); return structuredClone(emptyState); }
   }
   function save() {
-    if (storageBlocked) { storageDirty = true; toast(storageBlockedReason === 'migration' ? 'Saving is paused because the saved data upgrade could not be completed. Download a recovery copy, then reopen the app or restore a backup.' : 'Saving is paused because the existing saved data could not be read. Restore a backup first; the original copy is preserved.', true); return false; }
-    try { state.version = STATE_VERSION; localStorage.setItem(activeStoreKey(), JSON.stringify(state)); storageDirty = false; if (authUserId) scheduleCloudSync(); return true; }
-    catch (e) { storageDirty = true; toast('Could not save to browser storage. Your latest changes are still open in this window; download a backup before closing.', true); return false; }
+    if (storageBlocked) { storageDirty = true; updateTopbarSyncButton(); toast(storageBlockedReason === 'migration' ? 'Saving is paused because the saved data upgrade could not be completed. Download a recovery copy, then reopen the app or restore a backup.' : 'Saving is paused because the existing saved data could not be read. Restore a backup first; the original copy is preserved.', true); return false; }
+    try { state.version = STATE_VERSION; localStorage.setItem(activeStoreKey(), JSON.stringify(state)); storageDirty = false; if (authUserId) scheduleCloudSync(); updateTopbarSyncButton(); return true; }
+    catch (e) { storageDirty = true; updateTopbarSyncButton(); toast('Could not save to browser storage. Your latest changes are still open in this window; download a backup before closing.', true); return false; }
   }
-  function setCloudStatus(message) { cloudStatus = message; const target = $('[data-cloud-status]'); if (target) target.textContent = message; }
+  function setCloudStatus(message) { cloudStatus = message; const target = $('[data-cloud-status]'); if (target) target.textContent = message; updateTopbarSyncButton(); }
+  function updateTopbarSyncButton() {
+    const button = $('[data-action="topbar-sync"]'), label = $('[data-topbar-sync-label]'); if (!button || !label) return;
+    let text = 'Sync', title = 'Sync your workshop with your private cloud account.', status = 'ready';
+    if (storageBlocked) { text = 'Recover'; title = 'Saved data needs recovery. Open Account settings for recovery options.'; status = 'warning'; }
+    else if (storageDirty) { text = 'Save'; title = 'Some changes may not be saved. Open Account settings to download a backup.'; status = 'warning'; }
+    else if (!cloudAvailable) { text = 'Saved'; title = 'Your workshop is saved on this device. Open Account settings to see cloud sync options.'; status = 'local'; }
+    else if (cloudConflict) { text = 'Resolve'; title = 'Choose which workshop copy to keep.'; status = 'conflict'; }
+    else if (!authUser) { text = 'Sign in'; title = 'Open Account settings to sign in and enable cloud sync.'; status = 'local'; }
+    else if (cloudSyncing || cloudStatus.includes('Syncing')) { text = 'Syncing'; title = 'Syncing your latest workshop changes.'; status = 'syncing'; }
+    else if (!navigator.onLine) { text = 'Offline'; title = 'Changes are saved on this device and will sync when you reconnect.'; status = 'offline'; }
+    else if (cloudStatus.startsWith('Synced')) { text = 'Synced'; title = `${cloudStatus}. Click to sync now.`; status = 'synced'; }
+    else if (cloudStatus.includes('waiting to sync') || cloudStatus.startsWith('Saved here')) { text = 'Saving'; title = 'Changes are saved locally and waiting to sync.'; status = 'pending'; }
+    else if (cloudStatus.startsWith('Sync paused')) { text = 'Retry'; title = `${cloudStatus}. Click to retry.`; status = 'warning'; }
+    else { text = 'Sync'; title = cloudStatus; }
+    label.textContent = text; button.title = title; button.setAttribute('aria-label', title); button.dataset.state = status; button.disabled = cloudSyncing;
+    const icon = $('.topbar-sync-icon', button); if (icon) icon.classList.toggle('is-syncing', cloudSyncing);
+  }
+  function openAccountSettings() {
+    requestBuildExit(() => { currentProjectId = null; currentBuildId = null; currentPage = 'account'; renderApp(); });
+  }
+  function handleTopbarSync() {
+    if (storageBlocked || storageDirty || cloudConflict || !cloudAvailable || !authUser) { openAccountSettings(); return; }
+    if (!navigator.onLine) { setCloudStatus('Offline · changes saved on this device'); toast('Your workshop is saved here. Cloud sync will resume when you reconnect.'); return; }
+    syncCloudNow();
+  }
   function hasWorkshopRecords(value) {
     const settings = value?.settings || DEFAULT_SETTINGS;
     const hasBranding = JSON.stringify(normalizedBranding(settings.branding)) !== JSON.stringify(DEFAULT_BRANDING);
@@ -226,7 +251,7 @@
       if (JSON.stringify(state) !== JSON.stringify(snapshot)) scheduleCloudSync();
     } catch (error) {
       setCloudStatus(navigator.onLine ? `Sync paused · ${error.message || 'try again'}` : 'Offline · changes saved on this device');
-    } finally { cloudSyncing = false; }
+    } finally { cloudSyncing = false; updateTopbarSyncButton(); }
   }
   function chooseCloudCopy() {
     if (!cloudConflict) return;
@@ -614,8 +639,10 @@
         : `<div class="storage-warning" role="alert"><strong>Saved data could not be read.</strong><p>The original browser copy is preserved. Download a recovery copy before restoring a backup.</p><button class="button button-secondary button-small" data-action="export-recovery">Download recovery copy</button><button class="button button-secondary button-small" data-action="import">Restore from backup</button></div>`
       : storageDirty ? `<div class="storage-warning" role="alert"><strong>Some changes may not be saved.</strong><p>Download a backup before closing this window, then check available browser storage.</p><button class="button button-secondary button-small" data-action="export">Download backup</button></div>` : '';
     $('#page-content').innerHTML = `${saveWarning}${content}`;
+    updateTopbarSyncButton();
   }
   const root = $('#page-content');
+  $('[data-action="topbar-sync"]').addEventListener('click', handleTopbarSync);
   root.addEventListener('submit', e => {
     if (e.target.matches('[data-cloud-auth]')) { submitCloudAuth(e); return; }
     if (e.target.id !== 'workshop-profile-form') return;
