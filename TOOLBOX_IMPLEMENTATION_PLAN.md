@@ -101,4 +101,6 @@
 
 ## Repository inspection notes
 
-This plan is based on `index.html`, `app.js`, `styles.css`, `sw.js`, `README.md`, and the Supabase migration/schema. Toolbox layout and timer settings are backward-compatible local snapshot migrations through state version 12; no database schema or existing project/material/build records were changed.
+This plan is based on `index.html`, `app.js`, `styles.css`, `sw.js`, `README.md`, and the Supabase migration/schema. Toolbox layout and timer settings are backward-compatible local snapshot migrations through state version 12; invoicing advances the snapshot to version 13 without a SQL migration. No database schema or existing project/material/build records are rewritten by either feature.
+
+The product owner asked to retain all items in **Deferred work from the brief** for later. The later addition of invoicing is documented separately in [INVOICING_IMPLEMENTATION_PLAN.md](INVOICING_IMPLEMENTATION_PLAN.md); those Toolbox deferrals remain in place.
