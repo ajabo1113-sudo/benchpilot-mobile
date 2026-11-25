@@ -6,7 +6,7 @@
   const LEGACY_CLAIM_KEY = `${STORE_KEY}-legacy-claimed-by`;
   const CLOUD_REVISION_PREFIX = `${STORE_KEY}-cloud-revision-`;
   const CLOUD_BASE_PREFIX = `${STORE_KEY}-cloud-base-`;
-  const STATE_VERSION = 10;
+  const STATE_VERSION = 12;
   const DEFAULT_BRANDING = { shopName: '', personalName: '', logoDataUrl: '', primaryColor: '#174b3d', secondaryColor: '#22634e', backgroundColor: '#f7f7f3', surfaceColor: '#ffffff', textColor: '#202722' };
   const DEFAULT_FEATURE_VISIBILITY = { buildsMenu: true, cutCalculator: true, projectStatus: true, projectNotes: true, projectSawKerf: true, cutDrawings: true, projectMaterials: true, projectBuilds: true, buildVersionHistory: true };
   const FEATURE_OPTIONS = [
@@ -30,7 +30,16 @@
     ['cutCalculator', 'Cut calculator', 'Add or subtract measurements from the dashboard.']
   ];
   const DEFAULT_DASHBOARD_WIDGETS = ['quickActions', 'projectOverview', 'inventoryOverview', 'recentBuilds'];
-  const DEFAULT_SETTINGS = { units: 'inches', numberFormat: 'fraction', kerf: 0.125, branding: DEFAULT_BRANDING, darkMode: false, materialCardSize: 'medium', features: DEFAULT_FEATURE_VISIBILITY, dashboardWidgets: DEFAULT_DASHBOARD_WIDGETS };
+  const TOOLBOX_TOOLS = [
+    ['cutCalculator', 'Cut calculator', 'Add or subtract workshop measurements.', '⌗', 'calculator'],
+    ['measurementConverter', 'Measurement converter', 'Convert between imperial and metric units.', '↔', 'converter'],
+    ['areaVolume', 'Area & volume', 'Estimate surfaces, rooms, and rectangular volumes.', '▱', 'areaVolume'],
+    ['angleCalculator', 'Angle calculator', 'Calculate angles, rise/run, and slope.', '∠', 'angle'],
+    ['weightQuantity', 'Weight & quantity', 'Estimate item counts and total weight.', '⚖', 'weight'],
+    ['timers', 'Stopwatch & timers', 'Track elapsed work or run several timers at once.', '◷', 'timers']
+  ];
+  const DEFAULT_TOOLBOX_TOOLS = TOOLBOX_TOOLS.map(([id]) => id);
+  const DEFAULT_SETTINGS = { units: 'inches', numberFormat: 'fraction', kerf: 0.125, branding: DEFAULT_BRANDING, darkMode: false, materialCardSize: 'medium', features: DEFAULT_FEATURE_VISIBILITY, dashboardWidgets: DEFAULT_DASHBOARD_WIDGETS, toolboxTools: DEFAULT_TOOLBOX_TOOLS, toolboxTimers: { stopwatch: { elapsedMs: 0, startedAt: null }, timers: [] } };
   const COLOR_SCHEMES = {
     forest: { primaryColor: '#174b3d', secondaryColor: '#22634e', backgroundColor: '#f7f7f3', surfaceColor: '#ffffff', textColor: '#202722' },
     ocean: { primaryColor: '#22546b', secondaryColor: '#34768a', backgroundColor: '#f1f6f8', surfaceColor: '#ffffff', textColor: '#202a30' },
@@ -49,8 +58,9 @@
   const cloudAvailable = !!supabaseClient && (location.protocol === 'https:' || location.hostname === 'localhost');
   let storageBlocked = false, storageDirty = false, loadProblem = '', storageBlockedReason = '';
   let authUser = null, authUserId = null, cloudRevision = null, cloudConflict = null, cloudTimer = null, cloudSyncing = false, cloudStatus = cloudAvailable ? 'Offline mode · saved on this device' : 'Open the HTTPS app to sign in and sync';
-  let state = loadState(), currentPage = 'dashboard', currentProjectId = null, currentBuildId = null, dashboardEditMode = false, dashboardDraggedWidget = null;
+  let state = loadState(), currentPage = 'dashboard', currentProjectId = null, currentBuildId = null, dashboardEditMode = false, dashboardDraggedWidget = null, toolboxEditMode = false, toolboxDraggedTool = null, currentToolId = null;
   let projectSearch = '', projectStatusFilter = 'all', projectVisibilityFilter = 'active', materialTypeFilter = 'all', materialThicknessFilter = 'all', toastTimer;
+  const completedTimerNotices = new Set();
 
   function isRecord(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
   function normalizedBranding(value) {
@@ -68,6 +78,13 @@
     settings.features = { ...DEFAULT_FEATURE_VISIBILITY, ...(isRecord(value?.features) ? Object.fromEntries(Object.entries(value.features).filter(([key, enabled]) => Object.hasOwn(DEFAULT_FEATURE_VISIBILITY, key) && typeof enabled === 'boolean')) : {}) };
     const validWidgets = new Set(DASHBOARD_WIDGETS.map(([id]) => id));
     settings.dashboardWidgets = [...new Set((Array.isArray(value?.dashboardWidgets) ? value.dashboardWidgets : DEFAULT_DASHBOARD_WIDGETS).filter(id => validWidgets.has(id)))];
+    const validTools = new Set(TOOLBOX_TOOLS.map(([id]) => id));
+    settings.toolboxTools = [...new Set((Array.isArray(value?.toolboxTools) ? value.toolboxTools : DEFAULT_TOOLBOX_TOOLS).filter(id => validTools.has(id)))];
+    const savedTimers = isRecord(value?.toolboxTimers) ? value.toolboxTimers : {}, stopwatch = isRecord(savedTimers.stopwatch) ? savedTimers.stopwatch : {};
+    settings.toolboxTimers = {
+      stopwatch: { elapsedMs: Number.isFinite(Number(stopwatch.elapsedMs)) && Number(stopwatch.elapsedMs) >= 0 ? Number(stopwatch.elapsedMs) : 0, startedAt: Number.isFinite(Number(stopwatch.startedAt)) && Number(stopwatch.startedAt) > 0 ? Number(stopwatch.startedAt) : null },
+      timers: Array.isArray(savedTimers.timers) ? savedTimers.timers.filter(timer => isRecord(timer) && typeof timer.id === 'string' && typeof timer.name === 'string' && Number.isFinite(Number(timer.durationMs)) && Number(timer.durationMs) > 0 && Number(timer.durationMs) <= 604800000).slice(0, 20).map(timer => ({ id: timer.id, name: timer.name.trim().slice(0, 60) || 'Shop timer', durationMs: Number(timer.durationMs), remainingMs: Number.isFinite(Number(timer.remainingMs)) ? Math.max(0, Number(timer.remainingMs)) : Number(timer.durationMs), endsAt: Number.isFinite(Number(timer.endsAt)) && Number(timer.endsAt) > 0 ? Number(timer.endsAt) : null })) : []
+    };
     return settings;
   }
   function featureEnabled(key) { return state.settings.features?.[key] !== false; }
@@ -90,7 +107,7 @@
       const raw = localStorage.getItem(key);
       if (raw === null) return structuredClone(emptyState);
       const saved = JSON.parse(raw);
-      if (!isRecord(saved) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(saved.version) || !validProjects(saved.projects) || !validProjectBuilds(saved.projects) || (saved.materials !== undefined && !validMaterials(saved.materials)) || (saved.builds !== undefined && !validBuilds(saved.builds)) || (saved.settings !== undefined && !isRecord(saved.settings))) throw new Error('The saved workshop data has an unsupported format.');
+      if (!isRecord(saved) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(saved.version) || !validProjects(saved.projects) || !validProjectBuilds(saved.projects) || (saved.materials !== undefined && !validMaterials(saved.materials)) || (saved.builds !== undefined && !validBuilds(saved.builds)) || (saved.settings !== undefined && !isRecord(saved.settings))) throw new Error('The saved workshop data has an unsupported format.');
       if (saved.version < 3) for (const p of saved.projects) for (const part of p.parts || []) {
         if (part.materialId) { delete part.width; delete part.thickness; }
         else if (part.width !== undefined || part.thickness !== undefined) { part.legacyDimensions = { width: part.width, thickness: part.thickness }; delete part.width; delete part.thickness; }
@@ -142,11 +159,11 @@
     const settings = value?.settings || DEFAULT_SETTINGS;
     const hasBranding = JSON.stringify(normalizedBranding(settings.branding)) !== JSON.stringify(DEFAULT_BRANDING);
     const preferences = normalizedSettings(settings);
-    const hasPreferences = preferences.darkMode !== DEFAULT_SETTINGS.darkMode || preferences.materialCardSize !== DEFAULT_SETTINGS.materialCardSize || JSON.stringify(preferences.features) !== JSON.stringify(DEFAULT_FEATURE_VISIBILITY) || JSON.stringify(preferences.dashboardWidgets) !== JSON.stringify(DEFAULT_DASHBOARD_WIDGETS);
+    const hasPreferences = preferences.darkMode !== DEFAULT_SETTINGS.darkMode || preferences.materialCardSize !== DEFAULT_SETTINGS.materialCardSize || JSON.stringify(preferences.features) !== JSON.stringify(DEFAULT_FEATURE_VISIBILITY) || JSON.stringify(preferences.dashboardWidgets) !== JSON.stringify(DEFAULT_DASHBOARD_WIDGETS) || JSON.stringify(preferences.toolboxTools) !== JSON.stringify(DEFAULT_TOOLBOX_TOOLS) || preferences.toolboxTimers.stopwatch.elapsedMs > 0 || preferences.toolboxTimers.stopwatch.startedAt !== null || preferences.toolboxTimers.timers.length > 0;
     return !!(value?.projects?.length || value?.materials?.length || value?.builds?.length || settings.units !== DEFAULT_SETTINGS.units || settings.numberFormat !== DEFAULT_SETTINGS.numberFormat || Number(settings.kerf) !== DEFAULT_SETTINGS.kerf || hasBranding || hasPreferences);
   }
   function normalizeCloudData(value) {
-    if (!isRecord(value) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(value.version) || !validProjects(value.projects) || !validProjectBuilds(value.projects) || (value.materials !== undefined && !validMaterials(value.materials)) || (value.builds !== undefined && !validBuilds(value.builds)) || (value.settings !== undefined && !isRecord(value.settings))) throw new Error('The cloud workshop data has an unsupported format. Your local data was left unchanged.');
+    if (!isRecord(value) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(value.version) || !validProjects(value.projects) || !validProjectBuilds(value.projects) || (value.materials !== undefined && !validMaterials(value.materials)) || (value.builds !== undefined && !validBuilds(value.builds)) || (value.settings !== undefined && !isRecord(value.settings))) throw new Error('The cloud workshop data has an unsupported format. Your local data was left unchanged.');
     const projects = structuredClone(value.projects), materials = structuredClone(value.materials || []), builds = structuredClone(value.builds || []);
     if (value.version < 3) for (const p of projects) for (const part of p.parts || []) {
       if (part.materialId) { delete part.width; delete part.thickness; }
@@ -497,6 +514,22 @@
     const widgetLibrary = availableDashboardWidgets().filter(([id]) => !widgets.includes(id)).map(([id, name, description]) => `<button class="dashboard-library-card" data-action="add-dashboard-widget" data-widget-id="${esc(id)}"><strong>＋ ${esc(name)}</strong><small>${esc(description)}</small></button>`).join('');
     return `<section class="welcome-banner"><div class="banner-content"><p class="eyebrow">YOUR WORKSPACE</p><h1 class="banner-title">A good plan makes<br>good sawdust.</h1><p class="banner-copy">${BRAND.tagline} Keep every project, part, and measurement in one place.</p><button class="button banner-cta" data-action="new-project">＋ Start a project</button></div></section><div class="dashboard-customize-bar"><div><p class="eyebrow">YOUR WORKSPACE</p><h2>Dashboard</h2></div><button class="button ${dashboardEditMode ? 'button-primary' : 'button-secondary'}" data-action="toggle-dashboard-edit">${dashboardEditMode ? 'Done customizing' : 'Customize dashboard'}</button></div>${dashboardEditMode ? `<section class="dashboard-widget-library"><div><strong>Widget library</strong><small>Add the information and tools you want on this dashboard.</small></div><div class="dashboard-library-grid">${widgetLibrary || '<span class="subtle">All available widgets are on your dashboard.</span>'}</div></section>` : ''}<div class="dashboard-grid ${dashboardEditMode ? 'is-editing' : ''}">${widgets.length ? widgets.map(renderDashboardWidgetFrame).join('') : `<div class="dashboard-empty"><strong>Your dashboard is ready to personalize</strong><span>Add a widget from the library to get started.</span><button class="button button-secondary button-small" data-action="toggle-dashboard-edit">Choose widgets</button></div>`}</div>`;
   }
+  function renderToolbox() {
+    if (currentToolId) {
+      const tool = TOOLBOX_TOOLS.find(([id]) => id === currentToolId);
+      if (tool) return `<button class="text-link detail-back" data-action="toolbox-home">← All tools</button>${renderToolboxWorkspace(tool)}`;
+      currentToolId = null;
+    }
+    const ordered = state.settings.toolboxTools.filter(id => TOOLBOX_TOOLS.some(tool => tool[0] === id) && (id !== 'cutCalculator' || featureEnabled('cutCalculator')));
+    const cards = ordered.map((id, index) => {
+      const [toolId, name, description, icon] = TOOLBOX_TOOLS.find(tool => tool[0] === id);
+      const controls = toolboxEditMode ? `<div class="toolbox-card-controls"><button type="button" data-action="move-tool-up" data-tool-id="${esc(id)}" aria-label="Move ${esc(name)} up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-action="move-tool-down" data-tool-id="${esc(id)}" aria-label="Move ${esc(name)} down" ${index === ordered.length - 1 ? 'disabled' : ''}>↓</button><button type="button" data-action="hide-tool" data-tool-id="${esc(id)}">Hide</button></div>` : '';
+      return `<article class="toolbox-card" data-tool-card="${esc(id)}"><div class="toolbox-card-top"><span class="toolbox-icon" aria-hidden="true">${esc(icon)}</span>${toolboxEditMode ? `<button type="button" class="toolbox-drag-handle" draggable="true" data-tool-drag="${esc(id)}" aria-label="Drag to move ${esc(name)}">⠿</button>` : ''}</div><h2>${esc(name)}</h2><p>${esc(description)}</p><div class="toolbox-card-bottom"><button type="button" class="toolbox-open" data-open-tool="${esc(toolId)}">Open tool <span aria-hidden="true">→</span></button>${controls}</div></article>`;
+    }).join('');
+    const hidden = TOOLBOX_TOOLS.filter(([id]) => !ordered.includes(id) && (id !== 'cutCalculator' || featureEnabled('cutCalculator')));
+    const library = toolboxEditMode ? `<section class="toolbox-library"><div><strong>Hidden tools</strong><small>Restore a tool to put it back in your Toolbox.</small></div>${hidden.length ? hidden.map(([id, name, description]) => `<button class="toolbox-restore" data-action="restore-tool" data-tool-id="${esc(id)}"><strong>＋ ${esc(name)}</strong><small>${esc(description)}</small></button>`).join('') : '<span class="subtle">All available tools are visible.</span>'}</section>` : '';
+    return `${heading('YOUR WORKSPACE', 'Toolbox', 'Handy tools for planning and working in your shop.', `<div class="toolbox-heading-actions">${toolboxEditMode ? '<button class="button button-secondary" data-action="reset-toolbox">Reset layout</button>' : ''}<button class="button ${toolboxEditMode ? 'button-primary' : 'button-secondary'}" data-action="toggle-toolbox-edit">${toolboxEditMode ? 'Done customizing' : 'Customize Toolbox'}</button></div>`)}${toolboxEditMode ? `<div class="toolbox-customize-note">Drag to reorder on desktop, or use the arrow buttons. Hiding a tool never removes its data.</div>` : ''}${library}<div class="toolbox-grid">${cards || '<div class="empty-state"><h3>Your Toolbox is empty</h3><p>Restore a hidden tool from the library below.</p></div>'}</div>${!toolboxEditMode ? '<p class="toolbox-next">More workshop tools will appear here as they are added.</p>' : ''}`;
+  }
   function renderProjects() {
     const all = [...state.projects].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
     const visibleSet = all.filter(p => projectVisibilityFilter === 'archived' ? p.archived : !p.archived);
@@ -568,6 +601,88 @@
   function renderCalculator() {
     const frac = state.settings.numberFormat === 'fraction' && state.settings.units === 'inches';
     return `${heading('WORKSHOP TOOLS', 'Cut calculator', `Add or subtract shop measurements in ${unitName()}.`)}<section class="calculator-panel"><div class="calc-content"><div><div class="field"><label class="field-label" for="calc-first">First measurement (${unitName()})</label><input class="field-input" id="calc-first" placeholder="${state.settings.units === 'metric' ? '285.75' : frac ? '11 1/4″' : '11.25'}"></div><div class="field"><label class="field-label" for="calc-operation">Operation</label><select id="calc-operation" class="field-select"><option value="add">Add (+)</option><option value="subtract">Subtract (−)</option></select></div><div class="field"><label class="field-label" for="calc-second">Second measurement (${unitName()})</label><input class="field-input" id="calc-second" placeholder="${state.settings.units === 'metric' ? '19.05' : frac ? '3/4″' : '0.75'}"></div><button class="button button-primary" data-action="calculate">Calculate</button></div><div class="calc-output"><p class="eyebrow">RESULT</p><div id="calc-result" class="calc-result">—</div><div id="calc-decimal" class="subtle">Enter two measurements to start</div><div class="cut-list-note">Results display in ${unitName()}.</div></div></div></section>`;
+  }
+  const CONVERSION_UNITS = {
+    length: [['in', 'Inches', 0.0254], ['ft', 'Feet', 0.3048], ['yd', 'Yards', 0.9144], ['mi', 'Miles', 1609.344], ['mm', 'Millimeters', 0.001], ['cm', 'Centimeters', 0.01], ['m', 'Meters', 1]],
+    area: [['in2', 'Square inches', 0.00064516], ['ft2', 'Square feet', 0.09290304], ['yd2', 'Square yards', 0.83612736], ['mm2', 'Square millimeters', 0.000001], ['cm2', 'Square centimeters', 0.0001], ['m2', 'Square meters', 1]],
+    volume: [['in3', 'Cubic inches', 0.000016387064], ['ft3', 'Cubic feet', 0.028316846592], ['yd3', 'Cubic yards', 0.764554857984], ['ml', 'Milliliters', 0.000001], ['l', 'Liters', 0.001], ['m3', 'Cubic meters', 1]],
+    weight: [['g', 'Grams', 0.001], ['kg', 'Kilograms', 1], ['oz', 'Ounces', 0.028349523125], ['lb', 'Pounds', 0.45359237], ['ton', 'US tons', 907.18474]]
+  };
+  function toolboxUnitOptions(category, selected) {
+    if (category === 'temperature') return [['C', 'Celsius'], ['F', 'Fahrenheit']].map(([id, name]) => `<option value="${id}" ${selected === id ? 'selected' : ''}>${name}</option>`).join('');
+    return (CONVERSION_UNITS[category] || []).map(([id, name]) => `<option value="${id}" ${selected === id ? 'selected' : ''}>${name}</option>`).join('');
+  }
+  function formatDuration(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000)), hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60), rest = seconds % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+  }
+  function timerRemaining(timer, now = Date.now()) { return timer.endsAt ? Math.max(0, timer.endsAt - now) : Math.max(0, timer.remainingMs); }
+  function renderToolboxWorkspace(tool) {
+    const type = tool[4];
+    if (type === 'calculator') return renderCalculator();
+    if (type === 'timers') {
+      const clock = state.settings.toolboxTimers, elapsed = clock.stopwatch.elapsedMs + (clock.stopwatch.startedAt ? Math.max(0, Date.now() - clock.stopwatch.startedAt) : 0);
+      const timerRows = clock.timers.map(timer => { const left = timerRemaining(timer), running = !!timer.endsAt && left > 0; return `<article class="toolbox-timer-row ${left === 0 ? 'is-finished' : ''}" data-timer-row="${esc(timer.id)}"><div><strong>${esc(timer.name)}</strong><span class="toolbox-timer-display" data-timer-display="${esc(timer.id)}">${formatDuration(left)}</span><small data-timer-status>${left === 0 ? 'Finished' : running ? 'Running' : 'Paused'}</small></div><div class="toolbox-timer-actions"><button class="button button-secondary button-small" data-action="toggle-shop-timer" data-id="${esc(timer.id)}">${running ? 'Pause' : left === 0 ? 'Restart' : 'Start'}</button><button class="button button-secondary button-small" data-action="reset-shop-timer" data-id="${esc(timer.id)}">Reset</button><button class="button button-quiet button-small" data-action="delete-shop-timer" data-id="${esc(timer.id)}" aria-label="Delete ${esc(timer.name)}">×</button></div></article>`; }).join('');
+      return `${heading('TOOLBOX', tool[1], tool[2])}<section class="calculator-panel toolbox-tool" data-tool-type="timers"><div class="stopwatch-panel"><div><p class="eyebrow">STOPWATCH</p><strong class="stopwatch-display" data-stopwatch-display>${formatDuration(elapsed)}</strong></div><div class="detail-actions"><button class="button button-primary button-small" data-action="toggle-stopwatch">${clock.stopwatch.startedAt ? 'Pause' : 'Start'}</button><button class="button button-secondary button-small" data-action="reset-stopwatch">Reset</button></div></div><div class="toolbox-timer-section"><div class="detail-panel-header"><div><h2 class="detail-panel-title">Multi-timer</h2><p class="panel-subtitle">Timers continue accurately when you navigate away or reopen BenchPilot.</p></div></div><form class="toolbox-timer-create" data-create-timer><label class="toolbox-field">Timer name<input class="field-input" name="name" maxlength="60" placeholder="Glue-up"></label><label class="toolbox-field">Hours<input class="field-input" name="hours" type="number" min="0" max="168" value="0"></label><label class="toolbox-field">Minutes<input class="field-input" name="minutes" type="number" min="0" max="59" value="5"></label><label class="toolbox-field">Seconds<input class="field-input" name="seconds" type="number" min="0" max="59" value="0"></label><button class="button button-primary" type="submit">＋ Add timer</button></form><div class="toolbox-timer-list">${timerRows || '<div class="widget-empty"><strong>No timers running</strong><span>Add a timer for glue, finish, or any shop task.</span></div>'}</div></div></section>`;
+    }
+    if (type === 'converter') return `${heading('TOOLBOX', tool[1], tool[2])}<section class="calculator-panel toolbox-tool" data-tool-type="converter"><div class="toolbox-input-grid"><label class="toolbox-field">Category<select class="field-select" data-tool-field="category"><option value="length">Length</option><option value="area">Area</option><option value="volume">Volume</option><option value="weight">Weight</option><option value="temperature">Temperature</option></select></label><label class="toolbox-field">Value<input class="field-input" inputmode="decimal" data-tool-field="value" value="1"></label><label class="toolbox-field">From<select class="field-select" data-tool-field="from">${toolboxUnitOptions('length', 'in')}</select></label><label class="toolbox-field">To<select class="field-select" data-tool-field="to">${toolboxUnitOptions('length', 'mm')}</select></label></div><div class="toolbox-result" data-tool-result>25.4 mm</div><button type="button" class="button button-secondary button-small toolbox-copy-result" data-action="copy-tool-result">Copy result</button></section>`;
+    if (type === 'areaVolume') return `${heading('TOOLBOX', tool[1], tool[2])}<section class="calculator-panel toolbox-tool" data-tool-type="areaVolume"><div class="toolbox-input-grid"><label class="toolbox-field">Preset<select class="field-select" data-tool-field="preset"><option value="custom">Custom</option><option value="room">Room / floor</option><option value="wall">Wall / surface</option><option value="box">Box / container</option></select></label><label class="toolbox-field">Calculation<select class="field-select" data-tool-field="mode"><option value="area">Area · length × width</option><option value="volume">Volume · length × width × height</option></select></label><label class="toolbox-field">Dimension unit<select class="field-select" data-tool-field="dimensionUnit">${toolboxUnitOptions('length', state.settings.units === 'metric' ? 'mm' : 'in')}</select></label><label class="toolbox-field">Length<input class="field-input" inputmode="decimal" data-tool-field="length"></label><label class="toolbox-field">Width<input class="field-input" inputmode="decimal" data-tool-field="width"></label><label class="toolbox-field toolbox-height-field" hidden>Height<input class="field-input" inputmode="decimal" data-tool-field="height"></label></div><div class="toolbox-result" data-tool-result>Enter dimensions to calculate.</div><button type="button" class="button button-secondary button-small toolbox-copy-result" data-action="copy-tool-result">Copy result</button></section>`;
+    if (type === 'angle') return `${heading('TOOLBOX', tool[1], tool[2])}<section class="calculator-panel toolbox-tool" data-tool-type="angle"><div class="toolbox-input-grid"><label class="toolbox-field">Calculation<select class="field-select" data-tool-field="mode"><option value="rise">Rise and run</option><option value="complement">Complementary angle</option><option value="supplement">Supplementary angle</option><option value="triangle">Missing triangle angle</option></select></label><label class="toolbox-field angle-rise-field">Rise (${unitName()})<input class="field-input" inputmode="decimal" data-tool-field="rise"></label><label class="toolbox-field angle-run-field">Run (${unitName()})<input class="field-input" inputmode="decimal" data-tool-field="run"></label><label class="toolbox-field angle-primary-field" hidden>Angle (degrees)<input class="field-input" inputmode="decimal" data-tool-field="angle"></label><label class="toolbox-field angle-secondary-field" hidden>Second angle (degrees)<input class="field-input" inputmode="decimal" data-tool-field="angle2"></label></div><div class="toolbox-result" data-tool-result>Enter rise and run to calculate slope.</div><button type="button" class="button button-secondary button-small toolbox-copy-result" data-action="copy-tool-result">Copy result</button><div class="toolbox-angle-visual" data-angle-visual aria-hidden="true"><svg viewBox="0 0 160 90"><path d="M18 72H140M18 72L112 20"/><path d="M43 72A25 25 0 0 0 40 60" class="angle-arc"/><text x="48" y="61">θ</text></svg></div></section>`;
+    if (type === 'weight') return `${heading('TOOLBOX', tool[1], tool[2])}<section class="calculator-panel toolbox-tool" data-tool-type="weight"><div class="toolbox-input-grid"><label class="toolbox-field">Item weight<input class="field-input" inputmode="decimal" data-tool-field="itemWeight"></label><label class="toolbox-field">Weight unit<select class="field-select" data-tool-field="unit"><option value="g">Grams</option><option value="kg">Kilograms</option><option value="oz">Ounces</option><option value="lb">Pounds</option></select></label><label class="toolbox-field">Quantity<input class="field-input" inputmode="numeric" data-tool-field="quantity" value="1"></label><label class="toolbox-field">Container / tare weight<input class="field-input" inputmode="decimal" data-tool-field="tare" value="0"></label><label class="toolbox-field">Target total weight<input class="field-input" inputmode="decimal" data-tool-field="target"></label></div><div class="toolbox-result" data-tool-result>Enter an item weight to estimate totals.</div><button type="button" class="button button-secondary button-small toolbox-copy-result" data-action="copy-tool-result">Copy result</button></section>`;
+    return `<div class="coming-soon"><div><strong>This tool is not available yet</strong>Please return to the Toolbox.</div></div>`;
+  }
+  function toolboxField(root, name) { return root.querySelector(`[data-tool-field="${name}"]`); }
+  function unitById(category, id) { return (CONVERSION_UNITS[category] || []).find(unit => unit[0] === id); }
+  function temperatureConvert(value, from, to) {
+    const celsius = from === 'F' ? (value - 32) * 5 / 9 : value;
+    return to === 'F' ? celsius * 9 / 5 + 32 : celsius;
+  }
+  function updateToolboxResult(root) {
+    const tool = root.querySelector('.toolbox-tool'); if (!tool) return;
+    const result = $('[data-tool-result]', tool); if (!result) return;
+    const value = key => { const field = toolboxField(tool, key); if (!field || !String(field.value).trim()) return null; const parsed = parseMeasurement(field.value); return parsed === null ? null : parsed; };
+    if (tool.dataset.toolType === 'converter') {
+      const category = toolboxField(tool, 'category').value, number = value('value'), from = toolboxField(tool, 'from').value, to = toolboxField(tool, 'to').value;
+      if (number === null) { result.textContent = 'Enter a valid value to convert.'; return; }
+      let converted;
+      if (category === 'temperature') converted = temperatureConvert(number, from, to);
+      else { const source = unitById(category, from), target = unitById(category, to); if (!source || !target) { result.textContent = 'Choose units from the same measurement category.'; return; } converted = number * source[2] / target[2]; }
+      const display = category === 'length' && to === 'in' && state.settings.units === 'inches' && state.settings.numberFormat === 'fraction' ? fraction(converted) : roundText(converted, 6);
+      const suffix = category === 'temperature' ? `°${to}` : unitById(category, to)?.[1] || to;
+      result.textContent = `${display} ${suffix}`;
+      return;
+    }
+    if (tool.dataset.toolType === 'areaVolume') {
+      const mode = toolboxField(tool, 'mode').value, a = value('length'), b = value('width'), c = value('height');
+      $('.toolbox-height-field', tool).hidden = mode !== 'volume';
+      if (a === null || b === null || (mode === 'volume' && c === null)) { result.textContent = `Enter ${mode === 'volume' ? 'length, width, and height' : 'length and width'} to calculate.`; return; }
+      const unit = unitById('length', toolboxField(tool, 'dimensionUnit').value), toFeet = (unit?.[2] || 0.0254) / 0.3048, areaSqFt = a * b * toFeet * toFeet;
+      if (mode === 'area') result.textContent = `${roundText(areaSqFt, 4)} sq ft · ${roundText(areaSqFt * 0.09290304, 4)} m²`;
+      else { const cubicFt = a * b * c * toFeet * toFeet * toFeet; result.textContent = `${roundText(cubicFt, 4)} cu ft · ${roundText(cubicFt * 0.028316846592, 4)} m³`; }
+      return;
+    }
+    if (tool.dataset.toolType === 'angle') {
+      const mode = toolboxField(tool, 'mode').value;
+      const showRise = mode === 'rise', showFirst = mode !== 'rise';
+      $('.angle-rise-field', tool).hidden = !showRise; $('.angle-run-field', tool).hidden = !showRise;
+      $('.angle-primary-field', tool).hidden = !showFirst; $('.angle-secondary-field', tool).hidden = mode !== 'triangle';
+      let degrees = null, extra = '';
+      if (mode === 'rise') { const rise = value('rise'), run = value('run'); if (rise === null || run === null || run === 0) { result.textContent = 'Enter rise and a non-zero run.'; return; } degrees = Math.atan(rise / run) * 180 / Math.PI; extra = ` · ${roundText(rise / run * 100, 3)}% slope`; }
+      else { const angle = value('angle'); if (angle === null) { result.textContent = 'Enter an angle in degrees.'; return; } if (mode === 'complement') degrees = 90 - angle; else if (mode === 'supplement') degrees = 180 - angle; else { const angle2 = value('angle2'); if (angle2 === null) { result.textContent = 'Enter both known triangle angles.'; return; } degrees = 180 - angle - angle2; } }
+      if (degrees < 0 || degrees > 180) { result.textContent = 'The entered angles do not produce a valid result.'; return; }
+      const radians = degrees * Math.PI / 180; result.textContent = `${roundText(degrees, 4)}° · ${roundText(radians, 5)} rad${extra}`;
+      return;
+    }
+    if (tool.dataset.toolType === 'weight') {
+      const itemWeight = value('itemWeight'), quantityRaw = toolboxField(tool, 'quantity').value.trim(), quantity = quantityRaw && /^\d+$/.test(quantityRaw) ? Number(quantityRaw) : null, tare = value('tare') ?? 0, target = value('target'), unit = toolboxField(tool, 'unit').value;
+      if (itemWeight === null || itemWeight <= 0) { result.textContent = 'Enter a positive item weight to calculate.'; return; }
+      const factors = { g: 1, kg: 1000, oz: 28.349523125, lb: 453.59237 }, total = quantity === null ? null : itemWeight * quantity + tare;
+      const pieces = [`Total: ${total === null ? 'enter a whole quantity' : `${roundText(total, 4)} ${unit}`}`];
+      if (target !== null && target >= tare) pieces.push(`Quantity at target: ${Math.floor((target - tare) / itemWeight)} items`);
+      else if (target !== null) pieces.push('Target must be at least the tare weight.');
+      if (total !== null) pieces.push(`Total in kg: ${roundText(total * factors[unit] / 1000, 4)}`);
+      result.textContent = pieces.join(' · ');
+    }
   }
   function renderSettings() {
     const branding = normalizedBranding(state.settings.branding), accountStatus = cloudConflict ? 'Sync paused · choose a workshop copy' : authUser ? `Signed in as ${authUser.email || 'your account'}` : cloudAvailable ? 'Sign in to sync across devices' : 'Offline-only on this launch';
@@ -714,19 +829,19 @@
     applyWorkspaceAppearance();
     if (currentPage === 'builds' && !featureEnabled('buildsMenu')) { currentBuildId = null; currentPage = 'dashboard'; }
     if (currentPage === 'calculator' && !featureEnabled('cutCalculator')) currentPage = 'dashboard';
-    const buildsNav = $('.nav-item[data-page="builds"]'), calculatorNav = $('.nav-item[data-page="calculator"]');
+    const buildsNav = $('.nav-item[data-page="builds"]');
     if (buildsNav) buildsNav.hidden = !featureEnabled('buildsMenu');
-    if (calculatorNav) calculatorNav.hidden = !featureEnabled('cutCalculator');
+    if (currentToolId && currentToolId === 'cutCalculator' && !featureEnabled('cutCalculator')) currentToolId = null;
     const status = $('#data-save-status');
     if (status) status.textContent = storageBlocked ? 'Saved copy needs recovery' : storageDirty ? 'Changes not confirmed saved' : 'Saved on this device';
     const p = currentProjectId ? project(currentProjectId) : null; if (currentProjectId && !p) currentProjectId = null;
     const b = currentBuildId ? build(currentBuildId) : null; if (currentBuildId && !b) currentBuildId = null;
-    const breadcrumb = { dashboard: 'Dashboard', projects: 'Projects', builds: 'Builds', materials: 'Materials', calculator: 'Cut calculator', settings: 'Settings', account: 'Settings / Shop & account', preferences: 'Settings / App controls' };
+    const breadcrumb = { dashboard: 'Dashboard', projects: 'Projects', builds: 'Builds', materials: 'Materials', toolbox: currentToolId ? `Toolbox / ${TOOLBOX_TOOLS.find(tool => tool[0] === currentToolId)?.[1] || 'Tool'}` : 'Toolbox', calculator: 'Toolbox / Cut calculator', settings: 'Settings', account: 'Settings / Shop & account', preferences: 'Settings / App controls' };
     $('#breadcrumb-current').textContent = p ? 'Projects / Project details' : b ? 'Builds / Build details' : breadcrumb[currentPage] || 'Settings';
     $('#project-count').textContent = state.projects.filter(x => !x.archived && x.status !== 'complete').length;
-    const navPage = ['settings', 'account', 'preferences'].includes(currentPage) ? 'settings' : currentPage;
+    const navPage = ['settings', 'account', 'preferences'].includes(currentPage) ? 'settings' : currentPage === 'calculator' || currentPage === 'toolbox' ? 'toolbox' : currentPage;
     $$('.nav-item[data-page]').forEach(b => b.classList.toggle('active', b.dataset.page === navPage));
-    const pageRenderers = { dashboard: renderDashboard, projects: renderProjects, builds: renderBuilds, materials: renderMaterials, calculator: renderCalculator, settings: renderSettings, account: renderAccount, preferences: renderPreferences };
+    const pageRenderers = { dashboard: renderDashboard, projects: renderProjects, builds: renderBuilds, materials: renderMaterials, calculator: renderCalculator, toolbox: renderToolbox, settings: renderSettings, account: renderAccount, preferences: renderPreferences };
     const content = p ? renderProjectDetail(p) : b ? renderBuilds() : (pageRenderers[currentPage] || renderSettings)();
     const saveWarning = storageBlocked
       ? storageBlockedReason === 'migration'
@@ -734,12 +849,39 @@
         : `<div class="storage-warning" role="alert"><strong>Saved data could not be read.</strong><p>The original browser copy is preserved. Download a recovery copy before restoring a backup.</p><button class="button button-secondary button-small" data-action="export-recovery">Download recovery copy</button><button class="button button-secondary button-small" data-action="import">Restore from backup</button></div>`
       : storageDirty ? `<div class="storage-warning" role="alert"><strong>Some changes may not be saved.</strong><p>Download a backup before closing this window, then check available browser storage.</p><button class="button button-secondary button-small" data-action="export">Download backup</button></div>` : '';
     $('#page-content').innerHTML = `${saveWarning}${content}`;
+    updateToolboxResult($('#page-content'));
     updateTopbarSyncButton();
   }
   const root = $('#page-content');
   $('[data-action="topbar-sync"]').addEventListener('click', handleTopbarSync);
+  function refreshToolboxTimerDisplays() {
+    const clock = state.settings.toolboxTimers, watch = $('.stopwatch-display', root);
+    if (watch) watch.textContent = formatDuration(clock.stopwatch.elapsedMs + (clock.stopwatch.startedAt ? Math.max(0, Date.now() - clock.stopwatch.startedAt) : 0));
+    for (const timer of clock.timers) {
+      const row = $$('[data-timer-row]', root).find(item => item.dataset.timerRow === timer.id); if (!row) continue;
+      const remaining = timerRemaining(timer), running = !!timer.endsAt && remaining > 0, display = $('[data-timer-display]', row), status = $('[data-timer-status]', row), toggle = $('[data-action="toggle-shop-timer"]', row);
+      if (display) display.textContent = formatDuration(remaining);
+      if (status) status.textContent = remaining === 0 ? 'Finished' : running ? 'Running' : 'Paused';
+      if (toggle) toggle.textContent = running ? 'Pause' : remaining === 0 ? 'Restart' : 'Start';
+      row.classList.toggle('is-finished', remaining === 0);
+      if (remaining === 0 && !completedTimerNotices.has(timer.id)) { completedTimerNotices.add(timer.id); if (document.visibilityState === 'visible') toast(`${timer.name} finished.`); }
+    }
+  }
+  setInterval(refreshToolboxTimerDisplays, 1000);
+  root.addEventListener('input', e => { if (e.target.closest('.toolbox-tool')) updateToolboxResult(root); });
+  root.addEventListener('change', e => {
+    const tool = e.target.closest('.toolbox-tool'); if (!tool) return;
+    if (tool.dataset.toolType === 'converter' && e.target.matches('[data-tool-field="category"]')) {
+      const category = e.target.value, units = CONVERSION_UNITS[category] || [], first = units[0]?.[0] || 'C', second = units.at(-1)?.[0] || 'F';
+      toolboxField(tool, 'from').innerHTML = toolboxUnitOptions(category, first);
+      toolboxField(tool, 'to').innerHTML = toolboxUnitOptions(category, second);
+    }
+    if (tool.dataset.toolType === 'areaVolume' && e.target.matches('[data-tool-field="preset"]')) toolboxField(tool, 'mode').value = e.target.value === 'box' ? 'volume' : 'area';
+    updateToolboxResult(root);
+  });
   root.addEventListener('submit', e => {
     if (e.target.matches('[data-cloud-auth]')) { submitCloudAuth(e); return; }
+    if (e.target.matches('[data-create-timer]')) { e.preventDefault(); const data = new FormData(e.target), hours = Number(data.get('hours')), minutes = Number(data.get('minutes')), seconds = Number(data.get('seconds')), durationMs = ((hours * 3600) + (minutes * 60) + seconds) * 1000; if (![hours, minutes, seconds].every(Number.isInteger) || hours < 0 || hours > 168 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 || durationMs <= 0 || durationMs > 604800000) { toast('Choose a timer duration greater than zero and no longer than one week.', true); return; } if (state.settings.toolboxTimers.timers.length >= 20) { toast('BenchPilot can store up to 20 timers.', true); return; } const previous = structuredClone(state.settings.toolboxTimers); state.settings.toolboxTimers.timers.push({ id: uid(), name: String(data.get('name') || '').trim().slice(0, 60) || 'Shop timer', durationMs, remainingMs: durationMs, endsAt: null }); if (!save()) state.settings.toolboxTimers = previous; else toast('Timer added.'); renderApp(); return; }
     if (e.target.id !== 'workshop-profile-form') return;
     e.preventDefault();
     const form = new FormData(e.target), previous = structuredClone(normalizedBranding(state.settings.branding));
@@ -748,12 +890,25 @@
     renderApp(); toast('Workshop profile saved.');
   });
   root.addEventListener('click', e => {
-    const pageBtn = e.target.closest('[data-page]'); if (pageBtn) { const page = pageBtn.dataset.page; requestBuildExit(() => { currentProjectId = null; currentBuildId = null; currentPage = page; renderApp(); }); return; }
+    const pageBtn = e.target.closest('[data-page]'); if (pageBtn) { const page = pageBtn.dataset.page; requestBuildExit(() => { currentProjectId = null; currentBuildId = null; currentToolId = null; currentPage = page; renderApp(); }); return; }
+    const openTool = e.target.closest('[data-open-tool]'); if (openTool) { const id = openTool.dataset.openTool; if (!TOOLBOX_TOOLS.some(tool => tool[0] === id) || (id === 'cutCalculator' && !featureEnabled('cutCalculator'))) return; currentToolId = id; currentPage = 'toolbox'; currentProjectId = null; currentBuildId = null; renderApp(); return; }
     const openBuild = e.target.closest('[data-open-build]'); if (openBuild) { const id = openBuild.dataset.openBuild; requestBuildExit(() => { currentBuildId = id; currentProjectId = null; currentPage = 'builds'; renderApp(); }); return; }
     const open = e.target.closest('[data-open-project]'); if (open) { const id = open.dataset.openProject; requestBuildExit(() => { currentProjectId = id; currentBuildId = null; currentPage = 'projects'; renderApp(); }); return; }
     const b = e.target.closest('[data-action]'); if (!b) return;
     const action = b.dataset.action, id = b.dataset.id, p = ['new-part', 'edit-part', 'delete-part'].includes(action) ? project(currentProjectId) : project(id || currentProjectId);
-    if (action === 'toggle-dashboard-edit') { dashboardEditMode = !dashboardEditMode; renderApp(); }
+    if (action === 'toggle-toolbox-edit') { toolboxEditMode = !toolboxEditMode; renderApp(); }
+    else if (action === 'toolbox-home') { currentToolId = null; renderApp(); }
+    else if (action === 'toggle-stopwatch') { const timers = state.settings.toolboxTimers, previous = structuredClone(timers), watch = timers.stopwatch; if (watch.startedAt) { watch.elapsedMs += Math.max(0, Date.now() - watch.startedAt); watch.startedAt = null; } else watch.startedAt = Date.now(); if (!save()) state.settings.toolboxTimers = previous; renderApp(); }
+    else if (action === 'reset-stopwatch') { const previous = structuredClone(state.settings.toolboxTimers); state.settings.toolboxTimers.stopwatch = { elapsedMs: 0, startedAt: null }; if (!save()) state.settings.toolboxTimers = previous; renderApp(); }
+    else if (action === 'toggle-shop-timer') { const previous = structuredClone(state.settings.toolboxTimers), timer = state.settings.toolboxTimers.timers.find(item => item.id === id); if (!timer) return; const now = Date.now(); if (timer.endsAt && timer.endsAt > now) { timer.remainingMs = timer.endsAt - now; timer.endsAt = null; } else { if (timerRemaining(timer, now) <= 0) timer.remainingMs = timer.durationMs; timer.endsAt = now + timer.remainingMs; completedTimerNotices.delete(id); } if (!save()) state.settings.toolboxTimers = previous; renderApp(); }
+    else if (action === 'reset-shop-timer') { const previous = structuredClone(state.settings.toolboxTimers), timer = state.settings.toolboxTimers.timers.find(item => item.id === id); if (!timer) return; timer.endsAt = null; timer.remainingMs = timer.durationMs; completedTimerNotices.delete(id); if (!save()) state.settings.toolboxTimers = previous; renderApp(); }
+    else if (action === 'delete-shop-timer') { const previous = structuredClone(state.settings.toolboxTimers); state.settings.toolboxTimers.timers = state.settings.toolboxTimers.timers.filter(item => item.id !== id); completedTimerNotices.delete(id); if (!save()) state.settings.toolboxTimers = previous; renderApp(); }
+    else if (action === 'copy-tool-result') { const output = b.closest('.toolbox-tool')?.querySelector('[data-tool-result]')?.textContent?.trim(); if (!output || /enter .*calculate|enter a valid|choose units/i.test(output)) toast('Calculate a result before copying it.', true); else if (navigator.clipboard?.writeText) navigator.clipboard.writeText(output).then(() => toast('Result copied.')).catch(() => toast('Clipboard access was unavailable in this browser.', true)); else toast('Clipboard access was unavailable in this browser.', true); }
+    else if (action === 'reset-toolbox') { const previous = state.settings.toolboxTools.slice(); state.settings.toolboxTools = DEFAULT_TOOLBOX_TOOLS.slice(); if (!save()) state.settings.toolboxTools = previous; renderApp(); }
+    else if (action === 'hide-tool') { const previous = state.settings.toolboxTools.slice(); state.settings.toolboxTools = previous.filter(toolId => toolId !== b.dataset.toolId); if (!save()) state.settings.toolboxTools = previous; renderApp(); }
+    else if (action === 'restore-tool') { const toolId = b.dataset.toolId; if (!TOOLBOX_TOOLS.some(tool => tool[0] === toolId) || state.settings.toolboxTools.includes(toolId)) return; const previous = state.settings.toolboxTools.slice(); state.settings.toolboxTools.push(toolId); if (!save()) state.settings.toolboxTools = previous; renderApp(); }
+    else if (action === 'move-tool-up' || action === 'move-tool-down') { const previous = state.settings.toolboxTools.slice(), next = previous.slice(), from = next.indexOf(b.dataset.toolId), to = from + (action.endsWith('up') ? -1 : 1); if (from < 0 || to < 0 || to >= next.length) return; [next[from], next[to]] = [next[to], next[from]]; state.settings.toolboxTools = next; if (!save()) state.settings.toolboxTools = previous; renderApp(); }
+    else if (action === 'toggle-dashboard-edit') { dashboardEditMode = !dashboardEditMode; renderApp(); }
     else if (action === 'add-dashboard-widget') { const widgetId = b.dataset.widgetId; if (!DASHBOARD_WIDGETS.some(row => row[0] === widgetId) || state.settings.dashboardWidgets.includes(widgetId) || !availableDashboardWidgets().some(row => row[0] === widgetId)) return; const previous = state.settings.dashboardWidgets.slice(); state.settings.dashboardWidgets.push(widgetId); if (!save()) state.settings.dashboardWidgets = previous; renderApp(); }
     else if (action === 'remove-dashboard-widget') { const previous = state.settings.dashboardWidgets.slice(); state.settings.dashboardWidgets = previous.filter(widgetId => widgetId !== b.dataset.widgetId); if (!save()) state.settings.dashboardWidgets = previous; renderApp(); }
     else if (action === 'move-dashboard-widget-up' || action === 'move-dashboard-widget-down') { const previous = state.settings.dashboardWidgets.slice(), from = previous.indexOf(b.dataset.widgetId), to = from + (action.endsWith('up') ? -1 : 1); if (from < 0 || to < 0 || to >= previous.length) return; state.settings.dashboardWidgets.splice(from, 1); state.settings.dashboardWidgets.splice(to, 0, previous[from]); if (!save()) state.settings.dashboardWidgets = previous; renderApp(); }
@@ -802,11 +957,13 @@
     else if (action === 'import') $('#import-file').click();
     else if (action === 'close-modal') closeModal();
   });
-  root.addEventListener('dragstart', e => { const handle = e.target.closest('[data-widget-drag]'); if (!dashboardEditMode || !handle) return; dashboardDraggedWidget = handle.dataset.widgetDrag; if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dashboardDraggedWidget); } });
+  root.addEventListener('dragstart', e => { const toolHandle = e.target.closest('[data-tool-drag]'); if (toolboxEditMode && toolHandle) { toolboxDraggedTool = toolHandle.dataset.toolDrag; if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', toolboxDraggedTool); } return; } const handle = e.target.closest('[data-widget-drag]'); if (!dashboardEditMode || !handle) return; dashboardDraggedWidget = handle.dataset.widgetDrag; if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dashboardDraggedWidget); } });
+  root.addEventListener('dragover', e => { if (toolboxEditMode && toolboxDraggedTool && e.target.closest('[data-tool-card]')) e.preventDefault(); });
+  root.addEventListener('drop', e => { const target = e.target.closest('[data-tool-card]'), moved = toolboxDraggedTool; toolboxDraggedTool = null; if (!toolboxEditMode || !target || !moved || target.dataset.toolCard === moved) return; e.preventDefault(); const previous = state.settings.toolboxTools.slice(), next = previous.filter(id => id !== moved), targetIndex = next.indexOf(target.dataset.toolCard); if (targetIndex < 0) return; next.splice(targetIndex, 0, moved); state.settings.toolboxTools = next; if (!save()) state.settings.toolboxTools = previous; renderApp(); });
   root.addEventListener('dragover', e => { if (dashboardEditMode && dashboardDraggedWidget && e.target.closest('[data-dashboard-widget]')) e.preventDefault(); });
   root.addEventListener('drop', e => { const target = e.target.closest('[data-dashboard-widget]'), moved = dashboardDraggedWidget; dashboardDraggedWidget = null; if (!dashboardEditMode || !target || !moved || target.dataset.dashboardWidget === moved) return; e.preventDefault(); const previous = state.settings.dashboardWidgets.slice(), next = previous.filter(id => id !== moved), targetIndex = next.indexOf(target.dataset.dashboardWidget); if (targetIndex < 0) return; next.splice(targetIndex, 0, moved); state.settings.dashboardWidgets = next; if (!save()) state.settings.dashboardWidgets = previous; renderApp(); });
-  root.addEventListener('dragend', () => { dashboardDraggedWidget = null; });
-  $('.sidebar').addEventListener('click', e => { const b = e.target.closest('.nav-item[data-page]'); if (b) { const page = b.dataset.page; requestBuildExit(() => { currentPage = page; currentProjectId = null; currentBuildId = null; renderApp(); }); } });
+  root.addEventListener('dragend', () => { dashboardDraggedWidget = null; toolboxDraggedTool = null; });
+  $('.sidebar').addEventListener('click', e => { const b = e.target.closest('.nav-item[data-page]'); if (b) { const page = b.dataset.page; requestBuildExit(() => { currentPage = page; currentProjectId = null; currentBuildId = null; currentToolId = null; renderApp(); }); } });
   root.addEventListener('change', e => {
     if (e.target.matches('[data-logo-upload]')) { const file = e.target.files?.[0]; e.target.value = ''; if (file) saveWorkshopLogo(file); return; }
     if (e.target.matches('[data-brand-color]')) { const key = e.target.dataset.brandColor; if (!['primaryColor', 'secondaryColor', 'backgroundColor', 'surfaceColor', 'textColor'].includes(key) || !/^#[0-9a-f]{6}$/i.test(e.target.value)) return; const previous = structuredClone(normalizedBranding(state.settings.branding)); state.settings.branding = { ...previous, [key]: e.target.value }; if (!save()) { state.settings.branding = previous; renderApp(); return; } renderApp(); return; }
@@ -833,7 +990,7 @@
     const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
     try {
       const x = JSON.parse(await f.text());
-      if (!isRecord(x) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(x.version) || !validProjects(x.projects) || !validProjectBuilds(x.projects) || (x.materials !== undefined && !validMaterials(x.materials)) || (x.builds !== undefined && !validBuilds(x.builds)) || (x.settings !== undefined && !isRecord(x.settings))) throw new Error('This file is not a supported BenchPilot or Jabo Workshop backup, or one of its records is incomplete. Your current data was not changed.');
+      if (!isRecord(x) || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(x.version) || !validProjects(x.projects) || !validProjectBuilds(x.projects) || (x.materials !== undefined && !validMaterials(x.materials)) || (x.builds !== undefined && !validBuilds(x.builds)) || (x.settings !== undefined && !isRecord(x.settings))) throw new Error('This file is not a supported BenchPilot or Jabo Workshop backup, or one of its records is incomplete. Your current data was not changed.');
       if (!confirm(`Replace local data with ${x.projects.length} projects, ${x.materials?.length || 0} materials, and ${x.builds?.length || 0} builds? A copy of the current data will download first.`)) return;
       if (storageBlocked) exportRecoveryData(); else downloadText(JSON.stringify({ ...state, app: BRAND.name, exportedAt: new Date().toISOString() }, null, 2), `benchpilot-pre-restore-${new Date().toISOString().slice(0, 10)}.json`);
       if (x.version < 3) for (const p of x.projects) for (const part of p.parts || []) {

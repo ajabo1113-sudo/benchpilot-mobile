@@ -1,6 +1,6 @@
 # BenchPilot
 
-**Plan it. Build it. Track it.** BenchPilot is an offline-first workshop planner for Windows, Android, and iPhone. It includes a dashboard, projects, reusable versioned builds, stock inventory, project parts and an automatically grouped cut list, a measurement calculator, and local backup/restore. Signed-in users can sync a private workshop snapshot across devices through Supabase.
+**Plan it. Build it. Track it.** BenchPilot is an offline-first workshop planner for Windows, Android, and iPhone. It includes a dashboard, projects, reusable versioned builds, stock inventory, project parts and an automatically grouped cut list, a Toolbox for workshop utilities, and local backup/restore. Signed-in users can sync a private workshop snapshot across devices through Supabase.
 
 ## Start the app
 
@@ -31,7 +31,7 @@ Projects are saved in the current browser's local storage on that device. Use **
 
 ## Measurements
 
-Part lengths and stock dimensions are entered and stored as numeric inches. In **Settings → App controls**, switch between inches and millimeters, choose fractional or decimal displays for inches, and set the default saw kerf. Decimal input such as `11.25`, mixed fractions such as `11 1/4` and `11-1/4`, and fractions such as `3/4` are supported in inches. The calculator adds and subtracts measurements using the selected units.
+Part lengths and stock dimensions are entered and stored as numeric inches. In **Settings → App controls**, switch between inches and millimeters, choose fractional or decimal displays for inches, and set the default saw kerf. Decimal input such as `11.25`, mixed fractions such as `11 1/4` and `11-1/4`, and fractions such as `3/4` are supported in inches. The **Toolbox** contains the cut calculator, measurement converter, area and volume calculator, angle calculator, weight and quantity calculator, and stopwatch/multi-timer. Customize the Toolbox to reorder or hide tools; hidden tools remain available to restore. The cut calculator also remains available from its Dashboard widget. Timers derive their remaining time from saved timestamps, so refreshing or navigating away does not pause them.
 
 **Settings → Shop & account** holds sign-in, sync, manual backup and restore, and the workshop profile. The profile can set a shop name, a personal name, a logo, and a color scheme with editable colors. Profile details sync as part of the workshop snapshot. Logo images are limited to PNG, JPEG, or WebP and are resized before saving.
 
